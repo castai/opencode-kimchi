@@ -1,0 +1,44 @@
+{
+  "name": "@castai/opencode-kimchi",
+  "version": "1.0.0",
+  "description": "Conversation-aware model routing for OpenCode using Cast AI's Kimchi models",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node dist/heuristic-classifier.test.js && node dist/phase-detector.test.js && node dist/plugin.test.js",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "kimchi",
+    "cast-ai",
+    "model-router",
+    "automatic-model-selection"
+  ],
+  "author": "Cast AI",
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.3.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.3.13",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  },
+  "dependencies": {}
+}
