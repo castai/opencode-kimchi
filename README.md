@@ -59,7 +59,8 @@ Pass options via `opencode.json`:
   "plugin": [
     ["@castai/opencode-kimchi", {
       "provider": "kimchi",
-      "verbose": true
+      "verbose": true,
+      "telemetry": true
     }]
   ]
 }
@@ -69,6 +70,57 @@ Pass options via `opencode.json`:
 |--------|---------|-------------|
 | `provider` | `"kimchi"` | Provider ID to route (matches your Kimchi provider config) |
 | `verbose` | `false` | Log model selection decisions to the chat |
+| `telemetry` | `false` | Enable usage telemetry (can also be enabled via env var) |
+
+## Telemetry
+
+The plugin can send usage telemetry and productivity metrics to the Kimchi service. This is **opt-in** — telemetry is only active when explicitly enabled.
+
+### Enabling telemetry
+
+Either set the plugin option:
+
+```json
+{
+  "plugin": [
+    ["@castai/opencode-kimchi", { "telemetry": true }]
+  ]
+}
+```
+
+Or set the environment variable:
+
+```bash
+export OPENCODE_ENABLE_TELEMETRY=1
+```
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENCODE_ENABLE_TELEMETRY` | No | Set to `1` to enable telemetry (alternative to plugin option) |
+| `OPENCODE_OTLP_ENDPOINT` | Yes* | Kimchi logs ingest endpoint URL |
+| `OPENCODE_OTLP_METRICS_ENDPOINT` | Yes* | Kimchi metrics ingest endpoint URL |
+| `OPENCODE_OTLP_HEADERS` | Yes* | Authorization header (`Authorization=Bearer <token>`) |
+
+\* Required when telemetry is enabled.
+
+```bash
+export OPENCODE_OTLP_ENDPOINT=https://api.cast.ai/ai-optimizer/v1beta/logs:ingest
+export OPENCODE_OTLP_METRICS_ENDPOINT=https://api.cast.ai/ai-optimizer/v1beta/metrics:ingest
+export OPENCODE_OTLP_HEADERS="Authorization=Bearer YOUR_API_KEY_HERE"
+```
+
+### Data sent
+
+**API Request Logs** — sent per completed assistant message:
+- Model, provider, input/output tokens, cache tokens, cost, duration
+
+**Productivity Metrics** — cumulative, flushed every 30 seconds:
+- Token usage and cost by model
+- Git commits and pull requests (detected from bash tool)
+- Lines of code added/removed (from edit/write/patch tools)
+- Edit decisions by tool name and language
 
 ## Requirements
 
