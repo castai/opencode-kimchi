@@ -28,7 +28,10 @@
     "kimchi",
     "cast-ai",
     "model-router",
-    "automatic-model-selection"
+    "automatic-model-selection",
+    "otel",
+    "opentelemetry",
+    "telemetry"
   ],
   "author": "Cast AI",
   "license": "MIT",

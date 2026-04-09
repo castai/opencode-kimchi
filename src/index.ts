@@ -13,6 +13,7 @@ import {
   setActiveProfile,
 } from "./session-state.js";
 import { routingTools } from "./tools.js";
+import { buildTelemetryConfig, createTelemetry } from "./telemetry.js";
 
 const KIMCHI_PROVIDER = "kimchi";
 
@@ -122,19 +123,38 @@ function log(verbose: boolean, message: string): void {
   }
 }
 
-const plugin: Plugin = async (_ctx, options) => {
+const plugin: Plugin = async (ctx, options) => {
   const providerID = (options?.provider as string) ?? KIMCHI_PROVIDER;
   const verbose = (options?.verbose as boolean) ?? false;
   const profiles = resolveProfiles({
     models: options?.models as Partial<Record<ProfileID, string>> | undefined,
   });
 
+  const telemetryConfig = buildTelemetryConfig(options?.telemetry as boolean | undefined);
+  const telemetry = createTelemetry(telemetryConfig, ctx.client as any);
+
   return {
-    /**
-     * Custom LLM tools for self-routing.
-     * The model can suggest which mode to use for the next turn.
-     */
     tool: routingTools,
+
+    /**
+     * Forward session lifecycle and message events to the telemetry module.
+     */
+    event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
+      await telemetry.handleEvent(event);
+    },
+
+    /**
+     * Track tool executions for productivity metrics (commits, PRs, LOC, edits).
+     */
+    "tool.execute.after": async (
+      input: { tool: string; sessionID: string; callID: string; args: any },
+      output: { title: string; output: string; metadata: any },
+    ) => {
+      await telemetry.handleToolAfter(
+        { tool: input.tool, args: input.args ?? {} },
+        { result: output.output },
+      );
+    },
 
     /**
      * Read conversation history and extract structural signals.
@@ -345,5 +365,7 @@ export { plugin, resolveProfiles };
 export { classifyWithHeuristics } from "./heuristic-classifier.js";
 export { detectPhase, extractSignals } from "./phase-detector.js";
 export { routingTools } from "./tools.js";
+export { buildTelemetryConfig, createTelemetry } from "./telemetry.js";
 export type { ProfileID, AgentProfile } from "./profiles.js";
 export type { ConversationPhase, PhaseDetectionResult } from "./phase-detector.js";
+export type { TelemetryConfig, TelemetryClient, Telemetry } from "./telemetry.js";
