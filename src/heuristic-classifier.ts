@@ -106,6 +106,7 @@ const ASSISTANT_SIGNALS: RegExp[] = [
 interface ScoredProfile {
   profile: ProfileID;
   score: number;
+  keywordHits: number; // signals from keyword patterns (not length/contextual boosts)
 }
 
 function countSignals(text: string, patterns: RegExp[]): number {
@@ -124,13 +125,20 @@ export function classifyWithHeuristics(text: string): ClassificationResult {
   // so that language names and patterns inside pasted code don't inflate the coder score.
   const textForCoder = hasReviewIntent ? text.replace(/```[\s\S]*?```/g, "") : text;
 
+  const debugHits    = countSignals(text, DEBUG_SIGNALS);
+  const reviewHits   = countSignals(text, REVIEW_SIGNALS);
+  const refactorHits = countSignals(text, REFACTOR_SIGNALS);
+  const plannerHits  = countSignals(text, PLANNER_SIGNALS);
+  const coderHits    = countSignals(textForCoder, CODER_SIGNALS);
+  const assistantHits = countSignals(text, ASSISTANT_SIGNALS);
+
   const scores: ScoredProfile[] = [
-    { profile: "debugger",   score: countSignals(text, DEBUG_SIGNALS)    * 2.0 },
-    { profile: "reviewer",   score: countSignals(text, REVIEW_SIGNALS)   * 1.8 },
-    { profile: "refactorer", score: countSignals(text, REFACTOR_SIGNALS) * 1.7 },
-    { profile: "planner",    score: countSignals(text, PLANNER_SIGNALS)  * 1.5 },
-    { profile: "coder",      score: countSignals(textForCoder, CODER_SIGNALS) * 1.3 },
-    { profile: "assistant",  score: countSignals(text, ASSISTANT_SIGNALS) * 0.8 },
+    { profile: "debugger",   score: debugHits    * 2.0, keywordHits: debugHits },
+    { profile: "reviewer",   score: reviewHits   * 1.8, keywordHits: reviewHits },
+    { profile: "refactorer", score: refactorHits * 1.7, keywordHits: refactorHits },
+    { profile: "planner",    score: plannerHits  * 1.5, keywordHits: plannerHits },
+    { profile: "coder",      score: coderHits    * 1.3, keywordHits: coderHits },
+    { profile: "assistant",  score: assistantHits * 0.8, keywordHits: assistantHits },
   ];
 
   if (text.length > 500) {
@@ -167,18 +175,19 @@ export function classifyWithHeuristics(text: string): ClassificationResult {
   const top = scores[0];
   const second = scores[1];
   const total = scores.reduce((sum, s) => sum + s.score, 0);
-  // Confidence = relative gap (how dominant the winner is) + absolute strength (how many signals matched)
+
+  // Confidence formula:
+  //   relativeGap  — how dominant the winner is vs the runner-up
+  //   absoluteStrength — how many keyword signals matched (capped)
+  //   keywordPenalty — discount when the winner has no keyword matches
+  //     (score came entirely from contextual boosts like message length)
   const relativeGap = total > 0 ? (top.score - second.score) / total : 0;
   const absoluteStrength = Math.min(1.0, top.score / 1.5);
-  const confidence = Math.min(0.95, 0.2 + relativeGap * 0.3 + absoluteStrength * 0.45);
-
-  if (confidence < 0.4 && top.profile !== "coder") {
-    return {
-      profile: "coder",
-      confidence: 0.4,
-      reason: "heuristic: ambiguous, defaulting to coder",
-    };
-  }
+  const hasKeywordEvidence = top.keywordHits > 0;
+  const confidence = Math.min(
+    0.95,
+    (hasKeywordEvidence ? 0.2 : 0.05) + relativeGap * 0.3 + absoluteStrength * 0.45,
+  );
 
   return {
     profile: top.profile,

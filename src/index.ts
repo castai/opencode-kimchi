@@ -97,11 +97,10 @@ function extractFilePath(args: any): string | undefined {
   return undefined;
 }
 
-function parseCommand(text: string): { profile: ProfileID; sticky: boolean } | "auto" | "kimchi" | null {
+function parseCommand(text: string): { profile: ProfileID; sticky: boolean } | "auto" | null {
   const trimmed = text.trimStart();
 
   if (/^\/auto\b/i.test(trimmed)) return "auto";
-  if (/^\/kimchi\b/i.test(trimmed)) return "kimchi";
 
   if (/^\/plan\b/i.test(trimmed)) return { profile: "planner", sticky: false };
   if (/^\/code\b/i.test(trimmed)) return { profile: "coder", sticky: false };
@@ -171,7 +170,103 @@ function humanizeSource(source: string): string {
   return "auto";
 }
 
-function showRouting(client: any, profile: string, model: string, tier: string, source: string): void {
+function buildKimchiHelp(): string {
+  return [
+    "## Kimchi Auto-Router Commands",
+    "",
+    "| Command | Description |",
+    "|---------|-------------|",
+    "| `/kimchi` | Show current session status (mode, model, cost, context) |",
+    "| `/kimchi help` | Show this help |",
+    "| `/plan` | Switch to planning mode (reasoning tier) for this message |",
+    "| `/code` | Switch to coding mode (coding tier) for this message |",
+    "| `/quick` | Switch to quick mode (cheap tier) for this message |",
+    "| `/debug` | Switch to debug mode (reasoning tier) for this message |",
+    "| `/review` | Switch to review mode (reasoning tier) for this message |",
+    "| `/refactor` | Switch to refactor mode (coding tier) for this message |",
+    "| `/lock <mode>` | Lock to a mode until `/auto` (e.g. `/lock code`) |",
+    "| `/auto` | Resume auto-routing |",
+    "",
+    "Modes are one-shot by default — they apply to the current message only, then auto-routing resumes.",
+    "Use `/lock <mode>` to stay in a mode across multiple messages.",
+  ].join("\n");
+}
+
+function buildKimchiStatus(
+  session: ReturnType<typeof getSession>,
+  sessionCost: ReturnType<typeof getSessionCost>,
+  registry: ModelRegistry,
+  profiles: Record<string, AgentProfile>,
+  sessionID: string,
+): string {
+  const lines: string[] = [];
+
+  const activeProfile = session.activeProfile ? profiles[session.activeProfile] : null;
+  lines.push(`## Kimchi Status`);
+  lines.push("");
+  lines.push(`**Mode:** ${activeProfile?.label ?? "auto"}`);
+  lines.push(`**Model:** ${activeProfile?.model ?? "auto-routed"}`);
+  lines.push(`**Tier:** ${activeProfile?.tier ?? "auto"}`);
+
+  if (session.override) {
+    lines.push(`**Override:** ${session.override.profile} (${session.override.sticky ? "locked" : "one-shot"})`);
+  }
+
+  if (session.activeAgent) {
+    lines.push(`**Agent:** ${session.activeAgent}`);
+  }
+
+  lines.push("");
+
+  const contextLimit = activeProfile ? registry.getContextLimit(activeProfile.tier) : 128_000;
+  const contextPct = contextLimit > 0 ? Math.round((session.estimatedContextTokens / contextLimit) * 100) : 0;
+  lines.push(`**Context:** ~${Math.round(session.estimatedContextTokens / 1000)}K / ${Math.round(contextLimit / 1000)}K tokens (${contextPct}%)`);
+
+  lines.push("");
+
+  const expensive = registry.getMostExpensiveModel();
+  const savings = expensive ? estimateSavings(sessionCost, expensive.cost.input, expensive.cost.output) : 0;
+  lines.push(formatSessionCost(sessionCost, savings));
+
+  const modified = Array.from(session.activity.filesModified);
+  const readOnly = Array.from(session.activity.filesRead).filter((f) => !session.activity.filesModified.has(f));
+
+  if (modified.length > 0) {
+    lines.push("");
+    lines.push(`**Files modified (${modified.length}):** ${modified.slice(0, 10).join(", ")}${modified.length > 10 ? ` (+${modified.length - 10} more)` : ""}`);
+  }
+  if (readOnly.length > 0) {
+    lines.push(`**Files read (${readOnly.length}):** ${readOnly.slice(0, 10).join(", ")}${readOnly.length > 10 ? ` (+${readOnly.length - 10} more)` : ""}`);
+  }
+
+  if (session.history.length > 0) {
+    lines.push("");
+    const recent = session.history.slice(-5).map((h) => h.profile).join(" → ");
+    lines.push(`**Recent routing:** ${recent}`);
+  }
+
+  lines.push("");
+  lines.push("_Type `/kimchi help` to see available commands._");
+
+  return lines.join("\n");
+}
+
+const lastToastPerSession = new Map<string, string>();
+const MAX_TOAST_SESSIONS = 200;
+
+function showRouting(client: any, profile: string, model: string, tier: string, source: string, sessionID?: string): void {
+  const toastKey = `${profile}:${model}`;
+
+  if (sessionID) {
+    const last = lastToastPerSession.get(sessionID);
+    if (last === toastKey) return;
+    if (lastToastPerSession.size >= MAX_TOAST_SESSIONS) {
+      const oldest = lastToastPerSession.keys().next().value!;
+      lastToastPerSession.delete(oldest);
+    }
+    lastToastPerSession.set(sessionID, toastKey);
+  }
+
   const label = PROFILE_LABELS[profile] ?? profile;
   const tierLabel = TIER_LABELS[tier] ?? tier;
   const reason = humanizeSource(source);
@@ -368,6 +463,20 @@ const plugin: Plugin = async (ctx, options) => {
           config.agent[agent] = { ...config.agent[agent], ...defaults };
         }
       }
+
+      if (!config.command) config.command = {};
+      if (!config.command["kimchi"]) {
+        config.command["kimchi"] = {
+          description: "Show Kimchi auto-router status (mode, model, cost, context)",
+          template: "Show kimchi status",
+        };
+      }
+      if (!config.command["kimchi-help"]) {
+        config.command["kimchi-help"] = {
+          description: "Show available Kimchi commands",
+          template: "Show kimchi help",
+        };
+      }
     },
 
     "experimental.chat.messages.transform": async (_input, output) => {
@@ -416,7 +525,7 @@ const plugin: Plugin = async (ctx, options) => {
             recordDecision(sessionID, { profile: profileId, source: `fallback: ${fallbackState.failedModelID} → ${fallbackModel.id}` });
             output.message.model = { providerID, modelID: fallbackModel.id };
             log(verbose, `fallback: ${fallbackState.failedModelID} failed, switching to ${fallbackModel.id}`);
-            showRouting(client, profileId, fallbackModel.id, fallbackModel.tier, `fallback: ${fallbackState.failedModelID} failed`);
+            showRouting(client, profileId, fallbackModel.id, fallbackModel.tier, `fallback: ${fallbackState.failedModelID} failed`, sessionID);
             return;
           }
           log(verbose, `fallback chain exhausted for session ${sessionID}, no more models to try`);
@@ -426,17 +535,7 @@ const plugin: Plugin = async (ctx, options) => {
         const command = parseCommand(text);
         if (command === "auto") {
           setOverride(sessionID, null);
-          log(verbose, "Auto mode selection resumed.");
-        } else if (command === "kimchi") {
-          const session = getSession(sessionID);
-          const sessionCost = getSessionCost(sessionID);
-          const expensive = registry.getMostExpensiveModel();
-          const savings = expensive
-            ? estimateSavings(sessionCost, expensive.cost.input, expensive.cost.output)
-            : 0;
-          const costReport = formatSessionCost(sessionCost, savings);
-          const activeInfo = session.activeProfile ?? "auto";
-          log(true, `Mode: ${activeInfo}\n${costReport}`);
+          showRouting(client, "assistant", "auto", "auto", "override: auto", sessionID);
         } else if (command) {
           setOverride(sessionID, command);
         }
@@ -454,7 +553,7 @@ const plugin: Plugin = async (ctx, options) => {
           setActiveProfile(sessionID, profileId);
           recordDecision(sessionID, { profile: profileId, source: `agent: ${agentName} → ${tier}` });
           log(verbose, `-> ${profileId} (agent: ${agentName})`);
-          showRouting(client, profileId, model?.id ?? tier, tier, `agent: ${agentName}`);
+          showRouting(client, profileId, model?.id ?? tier, tier, `agent: ${agentName}`, sessionID);
           return;
         }
 
@@ -468,7 +567,7 @@ const plugin: Plugin = async (ctx, options) => {
           setActiveProfile(sessionID, profileId);
           recordDecision(sessionID, { profile: profileId, source: `direct: ${tier}` });
           log(verbose, `-> ${profileId} (direct ${tier} selection)`);
-          showRouting(client, profileId, model?.id ?? tier, tier, `direct: ${tier}`);
+          showRouting(client, profileId, model?.id ?? tier, tier, `direct: ${tier}`, sessionID);
           return;
         }
 
@@ -561,7 +660,7 @@ const plugin: Plugin = async (ctx, options) => {
         setActiveProfile(sessionID, profile.id);
         recordDecision(sessionID, { profile: profile.id, source });
         log(verbose, `-> ${profile.label} | ${source}`);
-        showRouting(client, profile.id, profile.model, profile.tier, source);
+        showRouting(client, profile.id, profile.model, profile.tier, source, sessionID);
       } catch (err) {
         log(verbose, `chat.message error: ${err}`);
       }
@@ -618,7 +717,7 @@ const plugin: Plugin = async (ctx, options) => {
                 if (upgrade && upgrade.id !== resolvedModel) {
                   log(verbose, `context ${session.estimatedContextTokens} tokens exceeds 85% of ${resolvedModel} (${contextLimit}), upgrading to ${upgrade.id} (${upgrade.contextWindow})`);
                   resolvedModel = upgrade.id;
-                  showRouting(client, activeProfile.id, resolvedModel, activeProfile.tier, `context-upgrade: ${resolvedModel}`);
+                  showRouting(client, activeProfile.id, resolvedModel, activeProfile.tier, `context-upgrade: ${resolvedModel}`, sessionID);
                 }
               }
             }
@@ -664,7 +763,7 @@ const plugin: Plugin = async (ctx, options) => {
         const activeProfile = session.activeProfile ? profiles[session.activeProfile] : null;
         if (shouldTriggerProactiveCompaction(input.sessionID, session.estimatedContextTokens, registry, activeProfile)) {
           log(verbose, `context at ${Math.round(session.estimatedContextTokens / 1000)}K tokens, triggering proactive compaction`);
-          showRouting(client, session.activeProfile ?? "assistant", "compacting", activeProfile?.tier ?? "coding", "proactive-compaction");
+          showRouting(client, session.activeProfile ?? "assistant", "compacting", activeProfile?.tier ?? "coding", "proactive-compaction", input.sessionID);
           triggerProactiveCompaction(
             input.sessionID,
             client,
@@ -786,29 +885,14 @@ const plugin: Plugin = async (ctx, options) => {
 
     "command.execute.before": async (input, output) => {
       try {
-        if (input.command !== "kimchi") return;
-
-        const session = getSession(input.sessionID);
-        const sessionCost = getSessionCost(input.sessionID);
-        const expensive = registry.getMostExpensiveModel();
-        const savings = expensive
-          ? estimateSavings(sessionCost, expensive.cost.input, expensive.cost.output)
-          : 0;
-
-        const lines: string[] = [];
-        lines.push(`Mode: ${session.activeProfile ?? "auto"}`);
-        if (session.activeAgent) {
-          lines.push(`Agent: ${session.activeAgent}`);
+        if (input.command === "kimchi") {
+          const session = getSession(input.sessionID);
+          const sessionCost = getSessionCost(input.sessionID);
+          const statusText = buildKimchiStatus(session, sessionCost, registry, profiles, input.sessionID);
+          output.parts.push({ type: "text", text: statusText } as any);
+        } else if (input.command === "kimchi-help") {
+          output.parts.push({ type: "text", text: buildKimchiHelp() } as any);
         }
-        if (session.override) {
-          lines.push(`Override: ${session.override.profile} (${session.override.sticky ? "locked" : "one-shot"})`);
-        }
-        lines.push(formatSessionCost(sessionCost, savings));
-
-        output.parts.push({
-          type: "text",
-          text: lines.join("\n"),
-        } as any);
       } catch (err) {
         log(verbose, `command.execute.before error: ${err}`);
       }
