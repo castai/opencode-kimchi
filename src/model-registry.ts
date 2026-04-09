@@ -50,18 +50,17 @@ interface TierPlacement {
  *
  * Only tier + priority are hardcoded. All other metadata comes from config.
  *
- * Reasoning — ranked by SWE-bench, GPQA, AIME:
- *   Opus family > o3 > o4-mini > o3-mini > Gemini 2.5 Pro >
- *   Kimi K2.5 (96% AIME / 76.8% SWE, $0.60/$3.00)
+ * Reasoning — ranked by SWE-bench, GPQA, AIME, with cost-efficiency preference:
+ *   Opus family > o3 > o4-mini > Kimi K2.5 (96% AIME / 76.8% SWE, $0.60/$3.00) >
+ *   o3-mini > Gemini 2.5 Pro
  *
- * Coding — ranked by HumanEval+, SWE-bench, agentic benchmarks:
- *   Sonnet family > GPT-4.1 > Kimi K2.5 (76.8% SWE, $0.60/$3.00) >
+ * Coding — ranked by performance/cost ratio:
+ *   Kimi K2.5 (76.8% SWE, $0.60/$3.00) > Sonnet family > GPT-4.1 >
  *   Gemini 2.5 Flash > Minimax M2.5 (80.2% SWE, $0.30/$1.20) > GPT-4.1 Mini
  *
  * Quick — ranked by cost-effectiveness:
- *   Minimax M2.5 ($0.30/$1.20) > GPT-4.1 Nano ($0.10/$0.40) >
- *   Gemini 2.0 Flash ($0.10/$0.40) > Kimi K2.5 ($0.60/$3.00) >
- *   Haiku 4.5 ($1/$5)
+ *   Kimi K2.5 ($0.60/$3.00) > Minimax M2.5 ($0.30/$1.20) > GPT-4.1 Nano ($0.10/$0.40) >
+ *   Gemini 2.0 Flash ($0.10/$0.40) > Haiku 4.5 ($1/$5)
  */
 const MODEL_PLACEMENTS: Record<string, TierPlacement[]> = {
   // ── Anthropic Opus — reasoning ──────────────────────────────────────
@@ -87,9 +86,9 @@ const MODEL_PLACEMENTS: Record<string, TierPlacement[]> = {
 
   // ── Kimi K2.5: 76.8% SWE, 96% AIME, $0.60/$3.00 — all three tiers
   "kimi-k2.5": [
-    { tier: "reasoning", priority: 60 },
-    { tier: "coding",    priority: 25 },
-    { tier: "quick",     priority: 40 },
+    { tier: "reasoning", priority: 35 },
+    { tier: "coding",    priority: 8 },
+    { tier: "quick",     priority: 5 },
   ],
 
   // ── Anthropic Sonnet — coding ───────────────────────────────────────

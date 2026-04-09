@@ -2,13 +2,23 @@
 
 Automatic model routing for [OpenCode](https://opencode.ai) using [Cast AI's Kimchi](https://github.com/castai/kimchi) models.
 
-The plugin analyzes each message and routes it to the most cost-effective model:
+The plugin analyzes each message and routes it to the most cost-effective model tier:
 
-| Tier | Model | When |
-|------|-------|------|
-| **Reasoning** | glm-5-fp8 | Planning, architecture, debugging, code review, security audit |
-| **Coding** | kimi-k2.5 | Implementation, refactoring, writing tests |
-| **Quick** | minimax-m2.5 | Simple questions, lookups, summaries, codebase exploration |
+| Tier | When |
+|------|------|
+| **Reasoning** | Planning, architecture, debugging, code review, security audit |
+| **Coding** | Implementation, refactoring, writing tests |
+| **Quick** | Simple questions, lookups, summaries, codebase exploration |
+
+The model used for each tier is selected dynamically from whatever models you have configured in your Kimchi provider. The plugin ranks known models by benchmark performance and cost, then picks the best available one per tier. A single model can serve multiple tiers — for example, `kimi-k2.5` is ranked across all three, and `minimax-m2.5` covers both coding and quick.
+
+**Reasoning tier** (ranked by SWE-bench, GPQA, AIME): Claude Opus family → o3 → o4-mini → Kimi K2.5 → o3-mini → Gemini 2.5 Pro
+
+**Coding tier** (ranked by performance/cost): Kimi K2.5 → Claude Sonnet family → GPT-4.1 → Gemini 2.5 Flash → Minimax M2.5 → GPT-4.1 Mini
+
+**Quick tier** (ranked by cost-effectiveness): Kimi K2.5 → Minimax M2.5 → GPT-4.1 Nano → Gemini 2.0 Flash → Claude Haiku
+
+Unknown models are auto-assigned to a tier based on their `reasoning` flag and cost.
 
 ## Install
 
@@ -36,30 +46,46 @@ When using `kimchi/auto`, classification uses a cascade approach:
 5. **Mode stickiness** — once in a mode, stays there unless a high-confidence signal says otherwise
 6. **LLM self-routing** — the model itself can suggest switching tiers for the next message
 
-## Override commands
+## Agent profiles
 
-| Command | Effect |
-|---------|--------|
-| `/plan` | Use reasoning model for the next message |
-| `/code` | Use coding model for the next message |
-| `/quick` | Use quick model for the next message |
-| `/debug` | Use reasoning model (debugger) for the next message |
-| `/review` | Use reasoning model (reviewer) for the next message |
-| `/refactor` | Use coding model (refactorer) for the next message |
-| `/lock <mode>` | Lock to a model until `/auto` |
-| `/auto` | Resume automatic model selection |
-| `/kimchi` | Show current mode, session cost, and estimated savings |
+Each model tier maps to a specialized agent profile with a tailored system prompt:
 
-## Cost tracking
+| Profile | Tier | Behavior |
+|---------|------|----------|
+| `planner` | Reasoning | Step-by-step thinking, trade-off analysis, phase breakdown |
+| `debugger` | Reasoning | Scientific method: observe → hypothesize → test → verify |
+| `reviewer` | Reasoning | Constructive criticism: bugs, security (OWASP), performance, edge cases |
+| `coder` | Coding | Complete implementation, no stubs, follows existing conventions |
+| `refactorer` | Coding | Behavior-preserving transformations, one change type at a time |
+| `assistant` | Quick | Concise and direct, terse answers, file lookups |
 
-The plugin tracks token usage and cost per session. Use `/kimchi` to see:
+Profiles are activated automatically based on routing.
 
-```
-Mode: coder
-Session cost: $0.0043 (42 messages)
-Estimated savings: $0.0127 (74% cheaper than all-reasoning)
-Routing: 6 reasoning, 28 coding, 8 quick
-```
+## Orchestration
+
+When running as `kimchi/auto`, the agent operates as an **orchestrator** — it plans, delegates, and verifies rather than doing all work directly:
+
+- Codebase exploration is delegated to `@explore` subagents
+- Multi-step research is delegated to `@general` subagents
+- Implementation work is delegated via `task()` with detailed prompts
+- Direct tool use is reserved for trivial single-file changes (< 20 lines)
+
+The plugin tracks direct vs. delegated tool calls and injects a reminder when the agent starts doing too much work itself instead of delegating.
+
+## Proactive context compaction
+
+When the conversation context exceeds 78% of the model's context window, the plugin automatically triggers a compaction — summarizing the conversation while preserving critical routing state:
+
+- Active mode and routing history
+- Files modified and read this session
+- Tool activity counts (edits, reads, errors)
+- Recent errors and user overrides
+
+This prevents context overflow without losing important session context.
+
+## Model fallback
+
+If a model request fails (rate limit, unavailability, etc.), the plugin automatically falls back to the next best model in the same tier, then across tiers if needed. Fallback state is tracked per session and cleared on success.
 
 ## Configuration
 
@@ -70,8 +96,8 @@ Routing: 6 reasoning, 28 coding, 8 quick
       "provider": "kimchi",
       "verbose": true,
       "models": {
-        "reasoning": "glm-5-fp8",
-        "coding": "kimi-k2.5",
+        "reasoning": "claude-opus-4-6",
+        "coding": "claude-sonnet-4-6",
         "quick": "minimax-m2.5"
       },
       "telemetry": true
@@ -79,6 +105,8 @@ Routing: 6 reasoning, 28 coding, 8 quick
   ]
 }
 ```
+
+The `models` override is optional — omit it and the plugin will automatically select the best available model per tier from your provider config.
 
 | Option | Default | Description |
 |--------|---------|-------------|
