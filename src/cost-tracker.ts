@@ -9,6 +9,9 @@ export interface SessionCost {
   messagesByTier: Record<ModelTier, number>;
   costByAgent: Record<string, number>;
   messagesByAgent: Record<string, number>;
+  costByModel: Record<string, number>;
+  messagesByModel: Record<string, number>;
+  tokensByModel: Record<string, { input: number; output: number }>;
 }
 
 interface MessageSnapshot {
@@ -17,6 +20,7 @@ interface MessageSnapshot {
   outputTokens: number;
   tier: ModelTier;
   agent?: string;
+  model?: string;
 }
 
 interface SessionTracker {
@@ -37,6 +41,9 @@ function emptySessionCost(): SessionCost {
     messagesByTier: { reasoning: 0, coding: 0, quick: 0 },
     costByAgent: {},
     messagesByAgent: {},
+    costByModel: {},
+    messagesByModel: {},
+    tokensByModel: {},
   };
 }
 
@@ -70,6 +77,7 @@ export function recordMessageCost(
   inputTokens: number,
   outputTokens: number,
   agent?: string,
+  model?: string,
 ): void {
   cost = Math.max(0, cost);
   inputTokens = Math.max(0, inputTokens);
@@ -90,6 +98,15 @@ export function recordMessageCost(
       session.costByAgent[prev.agent] = (session.costByAgent[prev.agent] ?? 0) - prev.cost;
       session.messagesByAgent[prev.agent] = (session.messagesByAgent[prev.agent] ?? 0) - 1;
     }
+    if (prev.model) {
+      session.costByModel[prev.model] = (session.costByModel[prev.model] ?? 0) - prev.cost;
+      session.messagesByModel[prev.model] = (session.messagesByModel[prev.model] ?? 0) - 1;
+      const prevTokens = session.tokensByModel[prev.model];
+      if (prevTokens) {
+        prevTokens.input -= prev.inputTokens;
+        prevTokens.output -= prev.outputTokens;
+      }
+    }
   }
 
   session.totalCost += cost;
@@ -102,8 +119,17 @@ export function recordMessageCost(
     session.costByAgent[agent] = (session.costByAgent[agent] ?? 0) + cost;
     session.messagesByAgent[agent] = (session.messagesByAgent[agent] ?? 0) + 1;
   }
+  if (model) {
+    session.costByModel[model] = (session.costByModel[model] ?? 0) + cost;
+    session.messagesByModel[model] = (session.messagesByModel[model] ?? 0) + 1;
+    if (!session.tokensByModel[model]) {
+      session.tokensByModel[model] = { input: 0, output: 0 };
+    }
+    session.tokensByModel[model].input += inputTokens;
+    session.tokensByModel[model].output += outputTokens;
+  }
 
-  tracker.seen.set(messageID, { cost, inputTokens, outputTokens, tier, agent });
+  tracker.seen.set(messageID, { cost, inputTokens, outputTokens, tier, agent, model });
 }
 
 export function estimateSavings(

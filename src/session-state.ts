@@ -48,6 +48,7 @@ export interface SessionState {
   activity: SessionActivity;
   history: RoutingDecision[];
   estimatedContextTokens: number;
+  welcomed: boolean;
 }
 
 const sessions = new Map<string, SessionState>();
@@ -77,6 +78,7 @@ function defaultState(): SessionState {
     activity: defaultActivity(),
     history: [],
     estimatedContextTokens: 0,
+    welcomed: false,
   };
 }
 

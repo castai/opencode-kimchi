@@ -247,6 +247,22 @@ function buildKimchiStatus(
   const savings = expensive ? estimateSavings(sessionCost, expensive.cost.input, expensive.cost.output) : 0;
   lines.push(formatSessionCost(sessionCost, savings));
 
+  const modelEntries = Object.entries(sessionCost.messagesByModel)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => (sessionCost.costByModel[b[0]] ?? 0) - (sessionCost.costByModel[a[0]] ?? 0));
+
+  if (modelEntries.length > 0) {
+    lines.push("");
+    lines.push("### Model Usage");
+    lines.push("| Model | Messages | Cost | Input Tokens | Output Tokens |");
+    lines.push("|-------|----------|------|-------------|---------------|");
+    for (const [model, count] of modelEntries) {
+      const modelCost = sessionCost.costByModel[model] ?? 0;
+      const tokens = sessionCost.tokensByModel[model] ?? { input: 0, output: 0 };
+      lines.push(`| ${model} | ${count} | $${modelCost.toFixed(4)} | ${tokens.input.toLocaleString()} | ${tokens.output.toLocaleString()} |`);
+    }
+  }
+
   const modified = Array.from(session.activity.filesModified);
   const readOnly = Array.from(session.activity.filesRead).filter((f) => !session.activity.filesModified.has(f));
 
@@ -676,10 +692,31 @@ const plugin: Plugin = async (ctx, options) => {
           }
         }
 
+        const agentForFloor = getSession(sessionID).activeAgent;
+        const isPrimaryForFloor = !agentForFloor || isPrimaryAgent(agentForFloor);
+        if (isPrimaryForFloor && profile.tier === "quick") {
+          log(verbose, `primary agent floored from quick (${profile.id}) to coding (coder)`);
+          profile = profiles.coder;
+          source = `floored: ${source} → coder (primary agents skip quick tier)`;
+        }
+
         setActiveProfile(sessionID, profile.id);
         recordDecision(sessionID, { profile: profile.id, source });
         log(verbose, `-> ${profile.label} | ${source}`);
         showRouting(client, profile.id, profile.model, profile.tier, source, sessionID);
+
+        const session2 = getSession(sessionID);
+        if (!session2.welcomed) {
+          session2.welcomed = true;
+          client?.tui?.showToast({
+            body: {
+              title: "Kimchi auto-router active",
+              message: "Models are selected automatically per message. Type /kimchi for session status or /kimchi-help for commands.",
+              variant: "info" as const,
+              duration: 7000,
+            },
+          }).catch(() => {});
+        }
       } catch (err) {
         log(verbose, `chat.message error: ${err}`);
       }
@@ -912,6 +949,10 @@ const plugin: Plugin = async (ctx, options) => {
         const inputTokens = info.tokens?.input ?? 0;
         const outputTokens = info.tokens?.output ?? 0;
 
+        const activeModel = session.activeProfile
+          ? profiles[session.activeProfile]?.model
+          : undefined;
+
         recordMessageCost(
           info.sessionID,
           info.id,
@@ -920,6 +961,7 @@ const plugin: Plugin = async (ctx, options) => {
           inputTokens,
           outputTokens,
           session.activeAgent ?? undefined,
+          activeModel ?? info.modelID,
         );
 
         if (inputTokens > 0) {

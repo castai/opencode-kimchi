@@ -143,7 +143,7 @@ async function test() {
   assert(await routeAndGetModel("s-plan", "m2", "Plan the architecture for the microservices migration") === "kimi-k2.5", "planning task routes to kimi-k2.5");
 
   _resetAll();
-  assert(await routeAndGetModel("s-quick", "m3", "What is the status?") === "minimax-m2.5", "quick task routes to minimax-m2.5");
+  assert(await routeAndGetModel("s-quick", "m3", "What is the status?") === "claude-sonnet-4-20250514", "quick task floored to coding tier for primary agent");
 
   _resetAll();
   assert(await routeAndGetModel("s-debug", "m4", "I'm getting a TypeError: Cannot read property 'id' of undefined") === "kimi-k2.5", "debug task routes to reasoning tier");
@@ -152,7 +152,7 @@ async function test() {
   assert(await routeAndGetModel("s-review", "m5", "Review this code for security vulnerabilities") === "kimi-k2.5", "review task routes to reasoning tier");
 
   _resetAll();
-  assert(await routeAndGetModel("s-explore", "m6", "Where is the database configuration file?") === "minimax-m2.5", "explore task routes to quick tier");
+  assert(await routeAndGetModel("s-explore", "m6", "Where is the database configuration file?") === "claude-sonnet-4-20250514", "explore-like query floored to coding tier for primary agent");
 
   _resetAll();
   assert(await routeAndGetModel("s-refactor", "m7", "Refactor the payment module to use the strategy pattern") === "claude-sonnet-4-20250514", "refactor task routes to coding tier");
@@ -196,7 +196,7 @@ async function test() {
   assert(await routeAndGetModel("s-agent6", "m75", "Plan the architecture for the auth system", "auto", "build") === "kimi-k2.5", "build agent falls through to heuristic (planning -> reasoning)");
 
   _resetAll();
-  assert(await routeAndGetModel("s-agent7", "m76", "What is this?", "auto", "plan") === "minimax-m2.5", "plan agent falls through to heuristic (simple question -> quick)");
+  assert(await routeAndGetModel("s-agent7", "m76", "What is this?", "auto", "plan") === "claude-sonnet-4-20250514", "plan agent floored to coding tier (primary agents skip quick)");
 
   // Unknown agents also fall through to heuristic classification
   _resetAll();
@@ -264,7 +264,7 @@ async function test() {
 
   _resetAll();
   assert(await routeAndGetModel("s-cmd1", "m10", "/plan What is the status?") === "kimi-k2.5", "/plan forces reasoning model");
-  assert(await routeAndGetModel("s-cmd1", "m11", "What is this?") === "minimax-m2.5", "one-shot /plan clears after use");
+  assert(await routeAndGetModel("s-cmd1", "m11", "What is this?") === "claude-sonnet-4-20250514", "one-shot /plan clears, quick floored to coding for primary agent");
 
   _resetAll();
   assert(await routeAndGetModel("s-cmd2", "m12", "/debug Check the login flow") === "kimi-k2.5", "/debug forces reasoning model");
@@ -278,7 +278,7 @@ async function test() {
   _resetAll();
   assert(await routeAndGetModel("s-lock", "m20", "/lock debug") === "kimi-k2.5", "/lock debug forces reasoning");
   assert(await routeAndGetModel("s-lock", "m21", "What is this?") === "kimi-k2.5", "locked debug persists");
-  assert(await routeAndGetModel("s-lock", "m22", "/auto What is this?") === "minimax-m2.5", "/auto clears lock");
+  assert(await routeAndGetModel("s-lock", "m22", "/auto What is this?") === "claude-sonnet-4-20250514", "/auto clears lock, quick floored to coding for primary agent");
 
   // =========================================================================
   // NON-KIMCHI PROVIDER IS SKIPPED
@@ -405,7 +405,7 @@ async function test() {
 
   // When context is small, quick tier resolves to minimax normally
   _resetAll();
-  assert(await routeAndGetModel("s-ctx1", "m100", "What is this?") === "minimax-m2.5", "context-aware: small context uses minimax for quick");
+  assert(await routeAndGetModel("s-ctx1", "m100", "What is this?") === "claude-sonnet-4-20250514", "context-aware: quick floored to coding for primary agent");
 
   // Simulate large context by updating context estimate via event
   _resetAll();
@@ -433,7 +433,7 @@ async function test() {
   _resetAll();
   await routeAndGetModel("s-ctx3", "m103", "What is this?");
   await hooks["event"]!({ event: { type: "message.updated", properties: { info: { id: "m103", sessionID: "s-ctx3", role: "assistant", providerID: "kimchi", cost: 0.001, tokens: { input: 50000, output: 2000 } } } } as any });
-  assert(await routeAndGetModel("s-ctx3", "m104", "What is the status?") === "minimax-m2.5", "context-aware: small context keeps minimax");
+  assert(await routeAndGetModel("s-ctx3", "m104", "What is the status?") === "claude-sonnet-4-20250514", "context-aware: quick floored to coding for primary agent");
 
   // =========================================================================
   // MODEL FALLBACK ON ERROR
