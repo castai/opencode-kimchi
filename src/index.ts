@@ -594,18 +594,7 @@ const plugin: Plugin = async (ctx, options) => {
         log(verbose, `-> ${profile.label} | ${source}`);
         showRouting(client, profile.id, profile.model, profile.tier, source, sessionID);
 
-        const session2 = getSession(sessionID);
-        if (!session2.welcomed) {
-          session2.welcomed = true;
-          client?.tui?.showToast({
-            body: {
-              title: "Kimchi auto-router active",
-              message: "Models are selected automatically per message. Type /kimchi for session status or /kimchi-help for commands.",
-              variant: "info" as const,
-              duration: 7000,
-            },
-          }).catch(() => {});
-        }
+
       } catch (err) {
         log(verbose, `chat.message error: ${err}`);
       }
