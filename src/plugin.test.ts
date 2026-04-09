@@ -307,7 +307,7 @@ async function test() {
   );
   assert(systemOutput.system.length === 3, "system transform adds profile prompt + delegation guidance");
   assert(systemOutput.system[1].includes("debugging"), "debugger profile system prompt injected");
-  assert(systemOutput.system[2].includes("orchestrator"), "delegation guidance injected alongside profile prompt");
+  assert(systemOutput.system[2].includes("DELEGATION CONTRACT"), "delegation guidance injected alongside profile prompt");
 
   const reviewForSystem = makeOutput("s-sys", "m41", "/review Check my code");
   await hooks["chat.message"]!({ sessionID: "s-sys", model: { providerID: "kimchi", modelID: "auto" } }, reviewForSystem);
@@ -331,7 +331,7 @@ async function test() {
     { sessionID: "s-nudge", model: { id: "auto", providerID: "kimchi" } as any },
     nudgeSystemOutput,
   );
-  assert(nudgeSystemOutput.system.some((s: string) => s.includes("STOP writing code")), "strong delegation nudge injected after 5+ direct calls with zero delegation");
+  assert(nudgeSystemOutput.system.some((s: string) => s.includes("CRITICAL VIOLATION")), "strong delegation nudge injected after 5+ direct calls with zero delegation");
 
   // No nudge if delegation has occurred
   _resetAll();
@@ -346,7 +346,7 @@ async function test() {
     { sessionID: "s-nonudge", model: { id: "auto", providerID: "kimchi" } as any },
     noNudgeSystemOutput,
   );
-  assert(!noNudgeSystemOutput.system.some((s: string) => s.includes("STOP writing code")), "no strong nudge when delegation has occurred");
+  assert(!noNudgeSystemOutput.system.some((s: string) => s.includes("CRITICAL VIOLATION")), "no strong nudge when delegation has occurred");
 
   // =========================================================================
   // TOOL.EXECUTE.AFTER — LIVE SIGNAL TRACKING

@@ -621,16 +621,19 @@ const plugin: Plugin = async (ctx, options) => {
               const ratio = getDelegationRatio(sessionID);
               if (ratio.direct >= 5 && ratio.delegated === 0) {
                 output.system.push(
-                  `[IMPORTANT] You have made ${ratio.direct} direct tool calls (reads, writes, edits) and ZERO delegations this session. ` +
-                  `You are doing the work yourself instead of orchestrating. ` +
-                  `STOP writing code directly. Use task() to delegate implementation to a subagent. ` +
-                  `Use @explore to delegate codebase search. Only make trivial single-file edits (< 20 lines) yourself.`
+                  `[CRITICAL VIOLATION] You have made ${ratio.direct} direct tool calls and ZERO delegations. ` +
+                  `You are violating the Delegation Contract. ` +
+                  `STOP immediately. ` +
+                  `MUST NOT: Write code, perform file operations, execute commands directly. ` +
+                  `MUST: Delegate to @explore, @general, or task(). ` +
+                  `MAY ONLY execute directly if: < 10 lines AND single file, OR user explicitly requests.`
                 );
-                log(verbose, `injected strong delegation nudge: ${ratio.direct} direct vs ${ratio.delegated} delegated`);
+                log(verbose, `injected CRITICAL delegation violation warning: ${ratio.direct} direct vs ${ratio.delegated} delegated`);
               } else if (ratio.direct >= 8 && ratio.direct > ratio.delegated * 3) {
                 output.system.push(
-                  `[REMINDER] Your direct tool usage (${ratio.direct}) is much higher than delegations (${ratio.delegated}). ` +
-                  `Prefer delegating via task() for implementation work and @explore for codebase searches.`
+                  `[DELEGATION REMINDER] Your direct tool usage (${ratio.direct}) is much higher than delegations (${ratio.delegated}). ` +
+                  `Per the Delegation Contract: Delegate to @explore for search, @general for research, task() for implementation. ` +
+                  `Only execute directly for: < 10 lines AND single file, OR coordination, OR explicit user request.`
                 );
               }
             }
