@@ -33,6 +33,9 @@ export interface SessionActivity {
   filesModified: Set<string>;
   filesRead: Set<string>;
   toolErrors: string[];
+  directToolCalls: number;
+  delegationToolCalls: number;
+  reminderInjected: boolean;
 }
 
 export interface SessionState {
@@ -57,6 +60,9 @@ function defaultActivity(): SessionActivity {
     filesModified: new Set(),
     filesRead: new Set(),
     toolErrors: [],
+    directToolCalls: 0,
+    delegationToolCalls: 0,
+    reminderInjected: false,
   };
 }
 
@@ -160,6 +166,30 @@ export function trackToolError(sessionID: string, errorSnippet: string): void {
   if (state.activity.toolErrors.length < MAX_TOOL_ERRORS) {
     state.activity.toolErrors.push(errorSnippet.slice(0, 200));
   }
+}
+
+export function trackDirectToolCall(sessionID: string): void {
+  const state = getSession(sessionID);
+  state.activity.directToolCalls++;
+}
+
+export function trackDelegationToolCall(sessionID: string): void {
+  const state = getSession(sessionID);
+  state.activity.delegationToolCalls++;
+  state.activity.reminderInjected = false;
+}
+
+export function shouldInjectDelegationReminder(sessionID: string): boolean {
+  const state = sessions.get(sessionID);
+  if (!state) return false;
+  if (state.activity.reminderInjected) return false;
+  if (state.activity.delegationToolCalls > 0) return false;
+  return state.activity.directToolCalls >= 3;
+}
+
+export function markReminderInjected(sessionID: string): void {
+  const state = sessions.get(sessionID);
+  if (state) state.activity.reminderInjected = true;
 }
 
 export function updateContextEstimate(sessionID: string, inputTokens: number): void {

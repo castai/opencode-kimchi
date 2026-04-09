@@ -305,8 +305,9 @@ async function test() {
     { sessionID: "s-sys", model: { id: "kimi-k2.5", providerID: "kimchi" } as any },
     systemOutput,
   );
-  assert(systemOutput.system.length === 2, "system transform adds profile prompt");
+  assert(systemOutput.system.length === 3, "system transform adds profile prompt + delegation guidance");
   assert(systemOutput.system[1].includes("debugging"), "debugger profile system prompt injected");
+  assert(systemOutput.system[2].includes("orchestrator"), "delegation guidance injected alongside profile prompt");
 
   const reviewForSystem = makeOutput("s-sys", "m41", "/review Check my code");
   await hooks["chat.message"]!({ sessionID: "s-sys", model: { providerID: "kimchi", modelID: "auto" } }, reviewForSystem);

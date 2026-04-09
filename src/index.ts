@@ -20,11 +20,16 @@ import {
   trackFileModified,
   trackFileRead,
   trackToolError,
+  trackDirectToolCall,
+  trackDelegationToolCall,
+  shouldInjectDelegationReminder,
+  markReminderInjected,
 } from "./session-state.js";
 import {
   getAgentRouting,
   shouldSkipClassification,
   getTaskToolEnhancement,
+  getDelegationGuidance,
 } from "./agent-router.js";
 import {
   KIMCHI_AGENT_NAME,
@@ -59,6 +64,18 @@ const CASTAI_LLM_BASE = "https://llm.cast.ai/openai/v1";
 
 const EDIT_TOOLS = new Set(["write", "edit", "patch", "bash", "shell", "file_write", "file_edit"]);
 const READ_TOOLS = new Set(["read", "glob", "grep", "search", "find", "file_read"]);
+const DIRECT_WORK_TOOLS = new Set([...EDIT_TOOLS, ...READ_TOOLS]);
+const DELEGATION_TOOLS = new Set(["task", "call_omo_agent"]);
+
+const DELEGATION_REMINDER = `[Delegation Reminder] You are using tools directly instead of delegating to subagents.
+
+As an orchestrator, you should:
+- Delegate codebase search to @explore: task(subagent_type="explore", load_skills=[], run_in_background=true, prompt="...")
+- Delegate implementation to subagents: task(category="quick", load_skills=[], run_in_background=false, prompt="1. TASK: ... 2. EXPECTED OUTCOME: ... 3. MUST DO: ... 4. CONTEXT: ...")
+- Only use tools directly for trivial changes (< 20 lines, single file)
+
+If you're reading files to understand the codebase → delegate to @explore.
+If you're editing multiple files → delegate via task().`;
 const ERROR_PATTERN = /\b(?:error|exception|failed|traceback)\b(?![\s-]*(?:handling|handler|boundary|boundaries|recovery|message|code|type|class))/i;
 
 const TIER_TO_PROFILE: Record<ModelTier, ProfileID> = {
@@ -676,6 +693,7 @@ const plugin: Plugin = async (ctx, options) => {
           const session = getSession(sessionID);
           if (session.activeProfile) {
             output.system.push(profiles[session.activeProfile].systemPrompt);
+            output.system.push(getDelegationGuidance());
             return;
           }
         }
@@ -685,6 +703,7 @@ const plugin: Plugin = async (ctx, options) => {
           const fallback = Object.values(profiles).find((p) => p.model === modelID);
           if (fallback) {
             output.system.push(fallback.systemPrompt);
+            output.system.push(getDelegationGuidance());
           }
         }
       } catch (err) {
@@ -745,6 +764,12 @@ const plugin: Plugin = async (ctx, options) => {
         const toolName = (input.tool ?? "").toLowerCase();
         const filePath = extractFilePath(input.args);
 
+        if (DELEGATION_TOOLS.has(toolName)) {
+          trackDelegationToolCall(input.sessionID);
+        } else if (DIRECT_WORK_TOOLS.has(toolName)) {
+          trackDirectToolCall(input.sessionID);
+        }
+
         if (EDIT_TOOLS.has(toolName)) {
           incrementLiveSignal(input.sessionID, "edits");
           if (filePath) trackFileModified(input.sessionID, filePath);
@@ -757,6 +782,12 @@ const plugin: Plugin = async (ctx, options) => {
           incrementLiveSignal(input.sessionID, "errors");
           const errorLine = (output.output ?? "").split("\n").find((l: string) => ERROR_PATTERN.test(l));
           if (errorLine) trackToolError(input.sessionID, errorLine.trim());
+        }
+
+        if (shouldInjectDelegationReminder(input.sessionID)) {
+          output.output = (output.output ?? "") + "\n\n" + DELEGATION_REMINDER;
+          markReminderInjected(input.sessionID);
+          log(verbose, `injected delegation reminder for session ${input.sessionID}`);
         }
 
         const session = getSession(input.sessionID);
