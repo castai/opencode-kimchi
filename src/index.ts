@@ -42,9 +42,6 @@ import { routingTools } from "./tools.js";
 import { buildTelemetryConfig, createTelemetry } from "./telemetry.js";
 import {
   recordMessageCost,
-  getSessionCost,
-  estimateSavings,
-  formatSessionCost,
 } from "./cost-tracker.js";
 import { classifyWithLlm } from "./llm-classifier.js";
 import {
@@ -189,102 +186,7 @@ function humanizeSource(source: string): string {
   return "auto";
 }
 
-function buildKimchiHelp(): string {
-  return [
-    "## Kimchi Auto-Router Commands",
-    "",
-    "| Command | Description |",
-    "|---------|-------------|",
-    "| `/kimchi` | Show current session status (mode, model, cost, context) |",
-    "| `/kimchi help` | Show this help |",
-    "| `/plan` | Switch to planning mode (reasoning tier) for this message |",
-    "| `/code` | Switch to coding mode (coding tier) for this message |",
-    "| `/quick` | Switch to quick mode (cheap tier) for this message |",
-    "| `/debug` | Switch to debug mode (reasoning tier) for this message |",
-    "| `/review` | Switch to review mode (reasoning tier) for this message |",
-    "| `/refactor` | Switch to refactor mode (coding tier) for this message |",
-    "| `/lock <mode>` | Lock to a mode until `/auto` (e.g. `/lock code`) |",
-    "| `/auto` | Resume auto-routing |",
-    "",
-    "Modes are one-shot by default — they apply to the current message only, then auto-routing resumes.",
-    "Use `/lock <mode>` to stay in a mode across multiple messages.",
-  ].join("\n");
-}
 
-function buildKimchiStatus(
-  session: ReturnType<typeof getSession>,
-  sessionCost: ReturnType<typeof getSessionCost>,
-  registry: ModelRegistry,
-  profiles: Record<string, AgentProfile>,
-  sessionID: string,
-): string {
-  const lines: string[] = [];
-
-  const activeProfile = session.activeProfile ? profiles[session.activeProfile] : null;
-  lines.push(`## Kimchi Status`);
-  lines.push("");
-  lines.push(`**Mode:** ${activeProfile?.label ?? "auto"}`);
-  lines.push(`**Model:** ${activeProfile?.model ?? "auto-routed"}`);
-  lines.push(`**Tier:** ${activeProfile?.tier ?? "auto"}`);
-
-  if (session.override) {
-    lines.push(`**Override:** ${session.override.profile} (${session.override.sticky ? "locked" : "one-shot"})`);
-  }
-
-  if (session.activeAgent) {
-    lines.push(`**Agent:** ${session.activeAgent}`);
-  }
-
-  lines.push("");
-
-  const contextLimit = activeProfile ? registry.getContextLimit(activeProfile.tier) : 128_000;
-  const contextPct = contextLimit > 0 ? Math.round((session.estimatedContextTokens / contextLimit) * 100) : 0;
-  lines.push(`**Context:** ~${Math.round(session.estimatedContextTokens / 1000)}K / ${Math.round(contextLimit / 1000)}K tokens (${contextPct}%)`);
-
-  lines.push("");
-
-  const expensive = registry.getMostExpensiveModel();
-  const savings = expensive ? estimateSavings(sessionCost, expensive.cost.input, expensive.cost.output) : 0;
-  lines.push(formatSessionCost(sessionCost, savings));
-
-  const modelEntries = Object.entries(sessionCost.messagesByModel)
-    .filter(([, count]) => count > 0)
-    .sort((a, b) => (sessionCost.costByModel[b[0]] ?? 0) - (sessionCost.costByModel[a[0]] ?? 0));
-
-  if (modelEntries.length > 0) {
-    lines.push("");
-    lines.push("### Model Usage");
-    lines.push("| Model | Messages | Cost | Input Tokens | Output Tokens |");
-    lines.push("|-------|----------|------|-------------|---------------|");
-    for (const [model, count] of modelEntries) {
-      const modelCost = sessionCost.costByModel[model] ?? 0;
-      const tokens = sessionCost.tokensByModel[model] ?? { input: 0, output: 0 };
-      lines.push(`| ${model} | ${count} | $${modelCost.toFixed(4)} | ${tokens.input.toLocaleString()} | ${tokens.output.toLocaleString()} |`);
-    }
-  }
-
-  const modified = Array.from(session.activity.filesModified);
-  const readOnly = Array.from(session.activity.filesRead).filter((f) => !session.activity.filesModified.has(f));
-
-  if (modified.length > 0) {
-    lines.push("");
-    lines.push(`**Files modified (${modified.length}):** ${modified.slice(0, 10).join(", ")}${modified.length > 10 ? ` (+${modified.length - 10} more)` : ""}`);
-  }
-  if (readOnly.length > 0) {
-    lines.push(`**Files read (${readOnly.length}):** ${readOnly.slice(0, 10).join(", ")}${readOnly.length > 10 ? ` (+${readOnly.length - 10} more)` : ""}`);
-  }
-
-  if (session.history.length > 0) {
-    lines.push("");
-    const recent = session.history.slice(-5).map((h) => h.profile).join(" → ");
-    lines.push(`**Recent routing:** ${recent}`);
-  }
-
-  lines.push("");
-  lines.push("_Type `/kimchi help` to see available commands._");
-
-  return lines.join("\n");
-}
 
 const lastToastPerSession = new Map<string, string>();
 const MAX_TOAST_SESSIONS = 200;
@@ -499,19 +401,6 @@ const plugin: Plugin = async (ctx, options) => {
         }
       }
 
-      if (!config.command) config.command = {};
-      if (!config.command["kimchi"]) {
-        config.command["kimchi"] = {
-          description: "Show Kimchi auto-router status (mode, model, cost, context)",
-          template: "Show kimchi status",
-        };
-      }
-      if (!config.command["kimchi-help"]) {
-        config.command["kimchi-help"] = {
-          description: "Show available Kimchi commands",
-          template: "Show kimchi help",
-        };
-      }
     },
 
     "experimental.chat.messages.transform": async (_input, output) => {
@@ -986,20 +875,7 @@ const plugin: Plugin = async (ctx, options) => {
       }
     },
 
-    "command.execute.before": async (input, output) => {
-      try {
-        if (input.command === "kimchi") {
-          const session = getSession(input.sessionID);
-          const sessionCost = getSessionCost(input.sessionID);
-          const statusText = buildKimchiStatus(session, sessionCost, registry, profiles, input.sessionID);
-          output.parts.push({ type: "text", text: statusText } as any);
-        } else if (input.command === "kimchi-help") {
-          output.parts.push({ type: "text", text: buildKimchiHelp() } as any);
-        }
-      } catch (err) {
-        log(verbose, `command.execute.before error: ${err}`);
-      }
-    },
+
   };
 };
 

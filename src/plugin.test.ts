@@ -54,7 +54,7 @@ async function test() {
   assert(typeof hooks["tool.execute.after"] === "function", "tool.execute.after hook exists");
   assert(typeof hooks["experimental.session.compacting"] === "function", "session.compacting hook exists");
   assert(typeof hooks["event"] === "function", "event hook exists");
-  assert(typeof hooks["command.execute.before"] === "function", "command.execute.before hook exists");
+
   assert(typeof hooks["config"] === "function", "config hook exists");
   assert(hooks.provider !== undefined, "provider hook exists");
   assert(typeof hooks.provider!.models === "function", "provider.models function exists");
