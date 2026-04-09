@@ -319,6 +319,35 @@ async function test() {
   );
   assert(systemOutput2.system[1].includes("review"), "reviewer profile system prompt injected after /review");
 
+  // Delegation nudge: after 5+ direct tool calls with zero delegation
+  _resetAll();
+  const nudgeSetup = makeOutput("s-nudge", "m42", "Implement a new feature");
+  await hooks["chat.message"]!({ sessionID: "s-nudge", model: { providerID: "kimchi", modelID: "auto" } }, nudgeSetup);
+  for (let i = 0; i < 6; i++) {
+    await hooks["tool.execute.after"]!({ tool: "edit", sessionID: "s-nudge", callID: `c${i}`, args: { filePath: `/src/file${i}.ts` } }, { title: "", output: "ok", metadata: {} });
+  }
+  const nudgeSystemOutput = { system: ["base"] };
+  await hooks["experimental.chat.system.transform"]!(
+    { sessionID: "s-nudge", model: { id: "auto", providerID: "kimchi" } as any },
+    nudgeSystemOutput,
+  );
+  assert(nudgeSystemOutput.system.some((s: string) => s.includes("STOP writing code")), "strong delegation nudge injected after 5+ direct calls with zero delegation");
+
+  // No nudge if delegation has occurred
+  _resetAll();
+  const noNudgeSetup = makeOutput("s-nonudge", "m43", "Implement something");
+  await hooks["chat.message"]!({ sessionID: "s-nonudge", model: { providerID: "kimchi", modelID: "auto" } }, noNudgeSetup);
+  for (let i = 0; i < 6; i++) {
+    await hooks["tool.execute.after"]!({ tool: "edit", sessionID: "s-nonudge", callID: `d${i}`, args: { filePath: `/src/f${i}.ts` } }, { title: "", output: "ok", metadata: {} });
+  }
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "s-nonudge", callID: "d-task", args: {} }, { title: "", output: "ok", metadata: {} });
+  const noNudgeSystemOutput = { system: ["base"] };
+  await hooks["experimental.chat.system.transform"]!(
+    { sessionID: "s-nonudge", model: { id: "auto", providerID: "kimchi" } as any },
+    noNudgeSystemOutput,
+  );
+  assert(!noNudgeSystemOutput.system.some((s: string) => s.includes("STOP writing code")), "no strong nudge when delegation has occurred");
+
   // =========================================================================
   // TOOL.EXECUTE.AFTER — LIVE SIGNAL TRACKING
   // =========================================================================

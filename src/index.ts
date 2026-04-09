@@ -24,10 +24,12 @@ import {
   trackDelegationToolCall,
   shouldInjectDelegationReminder,
   markReminderInjected,
+  getDelegationRatio,
 } from "./session-state.js";
 import {
   getAgentRouting,
   shouldSkipClassification,
+  isPrimaryAgent,
   getTaskToolEnhancement,
   getDelegationGuidance,
 } from "./agent-router.js";
@@ -689,11 +691,34 @@ const plugin: Plugin = async (ctx, options) => {
         if (inputProviderID && inputProviderID !== providerID) return;
 
         const sessionID = getSessionID(input as any);
+
         if (sessionID) {
           const session = getSession(sessionID);
+          const agentName = session.activeAgent;
+          const isPrimary = !agentName || isPrimaryAgent(agentName);
+
           if (session.activeProfile) {
             output.system.push(profiles[session.activeProfile].systemPrompt);
-            output.system.push(getDelegationGuidance());
+
+            if (isPrimary) {
+              output.system.push(getDelegationGuidance());
+
+              const ratio = getDelegationRatio(sessionID);
+              if (ratio.direct >= 5 && ratio.delegated === 0) {
+                output.system.push(
+                  `[IMPORTANT] You have made ${ratio.direct} direct tool calls (reads, writes, edits) and ZERO delegations this session. ` +
+                  `You are doing the work yourself instead of orchestrating. ` +
+                  `STOP writing code directly. Use task() to delegate implementation to a subagent. ` +
+                  `Use @explore to delegate codebase search. Only make trivial single-file edits (< 20 lines) yourself.`
+                );
+                log(verbose, `injected strong delegation nudge: ${ratio.direct} direct vs ${ratio.delegated} delegated`);
+              } else if (ratio.direct >= 8 && ratio.direct > ratio.delegated * 3) {
+                output.system.push(
+                  `[REMINDER] Your direct tool usage (${ratio.direct}) is much higher than delegations (${ratio.delegated}). ` +
+                  `Prefer delegating via task() for implementation work and @explore for codebase searches.`
+                );
+              }
+            }
             return;
           }
         }
@@ -703,7 +728,6 @@ const plugin: Plugin = async (ctx, options) => {
           const fallback = Object.values(profiles).find((p) => p.model === modelID);
           if (fallback) {
             output.system.push(fallback.systemPrompt);
-            output.system.push(getDelegationGuidance());
           }
         }
       } catch (err) {
@@ -764,10 +788,14 @@ const plugin: Plugin = async (ctx, options) => {
         const toolName = (input.tool ?? "").toLowerCase();
         const filePath = extractFilePath(input.args);
 
-        if (DELEGATION_TOOLS.has(toolName)) {
-          trackDelegationToolCall(input.sessionID);
-        } else if (DIRECT_WORK_TOOLS.has(toolName)) {
-          trackDirectToolCall(input.sessionID);
+        const trackingAgent = getSession(input.sessionID).activeAgent;
+        const isTrackingPrimary = !trackingAgent || isPrimaryAgent(trackingAgent);
+        if (isTrackingPrimary) {
+          if (DELEGATION_TOOLS.has(toolName)) {
+            trackDelegationToolCall(input.sessionID);
+          } else if (DIRECT_WORK_TOOLS.has(toolName)) {
+            trackDirectToolCall(input.sessionID);
+          }
         }
 
         if (EDIT_TOOLS.has(toolName)) {
@@ -784,7 +812,9 @@ const plugin: Plugin = async (ctx, options) => {
           if (errorLine) trackToolError(input.sessionID, errorLine.trim());
         }
 
-        if (shouldInjectDelegationReminder(input.sessionID)) {
+        const sessionAgent = getSession(input.sessionID).activeAgent;
+        const isSessionPrimary = !sessionAgent || isPrimaryAgent(sessionAgent);
+        if (isSessionPrimary && shouldInjectDelegationReminder(input.sessionID)) {
           output.output = (output.output ?? "") + "\n\n" + DELEGATION_REMINDER;
           markReminderInjected(input.sessionID);
           log(verbose, `injected delegation reminder for session ${input.sessionID}`);

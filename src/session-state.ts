@@ -187,6 +187,15 @@ export function shouldInjectDelegationReminder(sessionID: string): boolean {
   return state.activity.directToolCalls >= 3;
 }
 
+export function getDelegationRatio(sessionID: string): { direct: number; delegated: number } {
+  const state = sessions.get(sessionID);
+  if (!state) return { direct: 0, delegated: 0 };
+  return {
+    direct: state.activity.directToolCalls,
+    delegated: state.activity.delegationToolCalls,
+  };
+}
+
 export function markReminderInjected(sessionID: string): void {
   const state = sessions.get(sessionID);
   if (state) state.activity.reminderInjected = true;
