@@ -1,52 +1,41 @@
-/**
- * Per-session state management.
- *
- * Tracks the current profile, manual overrides, conversation history summary,
- * and routing decisions for each session.
- */
-
 import type { ProfileID } from "./profiles.js";
+import type { ModelTier } from "./model-registry.js";
 
 export interface ManualOverride {
   profile: ProfileID;
-  sticky: boolean; // true = locked until /auto, false = one-shot
+  sticky: boolean;
 }
 
 export interface RoutingDecision {
   profile: ProfileID;
-  source: string; // e.g. "phase:implementation", "override:plan", "heuristic:coding"
+  source: string;
   timestamp: number;
 }
 
 export interface ConversationSignals {
-  /** Number of tool calls in recent messages */
   recentToolCalls: number;
-  /** Number of file-editing tool calls (write, edit, patch, bash) */
   recentEditToolCalls: number;
-  /** Number of read-only tool calls (read, glob, grep) */
   recentReadToolCalls: number;
-  /** Average length of recent user messages */
   avgUserMsgLength: number;
-  /** Average length of recent assistant messages */
   avgAssistantMsgLength: number;
-  /** Code block count in recent messages */
   codeBlockCount: number;
-  /** Number of messages mentioning errors/exceptions/crashes */
   errorMentions: number;
-  /** Total message count in conversation */
   totalMessages: number;
 }
 
+export interface LiveSignals {
+  edits: number;
+  reads: number;
+  errors: number;
+}
+
 export interface SessionState {
-  /** Active manual override (slash commands) */
   override: ManualOverride | null;
-  /** Profile suggested by LLM self-routing tool for next turn */
-  nextProfileSuggestion: ProfileID | null;
-  /** Currently active profile (set by chat.message, read by system.transform) */
+  nextTierSuggestion: ModelTier | null;
   activeProfile: ProfileID | null;
-  /** Latest conversation signals (updated by messages.transform hook) */
+  activeAgent: string | null;
   signals: ConversationSignals | null;
-  /** Recent routing decisions (capped at 20) */
+  liveSignals: LiveSignals;
   history: RoutingDecision[];
 }
 
@@ -57,9 +46,11 @@ const MAX_HISTORY = 20;
 function defaultState(): SessionState {
   return {
     override: null,
-    nextProfileSuggestion: null,
+    nextTierSuggestion: null,
     activeProfile: null,
+    activeAgent: null,
     signals: null,
+    liveSignals: { edits: 0, reads: 0, errors: 0 },
     history: [],
   };
 }
@@ -88,15 +79,15 @@ export function consumeOneShotOverride(sessionID: string): ManualOverride | null
   return override;
 }
 
-export function setNextProfileSuggestion(sessionID: string, profile: ProfileID | null): void {
+export function setNextTierSuggestion(sessionID: string, tier: ModelTier | null): void {
   const state = getSession(sessionID);
-  state.nextProfileSuggestion = profile;
+  state.nextTierSuggestion = tier;
 }
 
-export function consumeNextProfileSuggestion(sessionID: string): ProfileID | null {
+export function consumeNextTierSuggestion(sessionID: string): ModelTier | null {
   const state = getSession(sessionID);
-  const suggestion = state.nextProfileSuggestion;
-  state.nextProfileSuggestion = null;
+  const suggestion = state.nextTierSuggestion;
+  state.nextTierSuggestion = null;
   return suggestion;
 }
 
@@ -105,9 +96,23 @@ export function setActiveProfile(sessionID: string, profile: ProfileID): void {
   state.activeProfile = profile;
 }
 
+export function setActiveAgent(sessionID: string, agent: string | null): void {
+  const state = getSession(sessionID);
+  state.activeAgent = agent;
+}
+
 export function updateSignals(sessionID: string, signals: ConversationSignals): void {
   const state = getSession(sessionID);
   state.signals = signals;
+}
+
+export function incrementLiveSignal(
+  sessionID: string,
+  signal: keyof LiveSignals,
+  amount = 1,
+): void {
+  const state = getSession(sessionID);
+  state.liveSignals[signal] += amount;
 }
 
 export function recordDecision(sessionID: string, decision: Omit<RoutingDecision, "timestamp">): void {
@@ -122,7 +127,6 @@ export function clearSession(sessionID: string): void {
   sessions.delete(sessionID);
 }
 
-/** For testing */
 export function _resetAll(): void {
   sessions.clear();
 }

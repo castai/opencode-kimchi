@@ -43,12 +43,16 @@ const cases: TestCase[] = [
   { input: "Give me feedback on this code — any problems?", expected: "reviewer", label: "code feedback" },
   { input: "Code review the authentication module", expected: "reviewer", label: "code review" },
 
-  // --- Explorer ---
-  { input: "Where is the database connection configured?", expected: "explorer", label: "find config" },
-  { input: "Find all files that import the UserService class", expected: "explorer", label: "find imports" },
-  { input: "How is the project directory structured?", expected: "explorer", label: "project structure" },
-  { input: "Which file handles the /api/auth route?", expected: "explorer", label: "find route handler" },
-  { input: "List all the API endpoints in the project", expected: "explorer", label: "list endpoints" },
+  // --- Assistant (now includes exploration) ---
+  { input: "Where is the database connection configured?", expected: "assistant", label: "find config" },
+  { input: "Find all files that import the UserService class", expected: "assistant", label: "find imports" },
+  { input: "How is the project directory structured?", expected: "assistant", label: "project structure" },
+  { input: "Which file handles the /api/auth route?", expected: "assistant", label: "find route handler" },
+  { input: "List all the API endpoints in the project", expected: "assistant", label: "list endpoints" },
+  { input: "What is a monad?", expected: "assistant", label: "what is" },
+  { input: "Yes", expected: "assistant", label: "yes" },
+  { input: "Thanks", expected: "assistant", label: "thanks" },
+  { input: "ok", expected: "assistant", label: "ok" },
 
   // --- Refactorer ---
   { input: "Refactor the payment module to use the strategy pattern", expected: "refactorer", label: "refactor pattern" },
@@ -56,12 +60,6 @@ const cases: TestCase[] = [
   { input: "Simplify the nested if-else in the auth middleware", expected: "refactorer", label: "simplify nesting" },
   { input: "Extract the common logic into a shared utility", expected: "refactorer", label: "extract utility" },
   { input: "Rename the variable from 'data' to something more descriptive", expected: "refactorer", label: "rename variable" },
-
-  // --- Assistant ---
-  { input: "What is a monad?", expected: "assistant", label: "what is" },
-  { input: "Yes", expected: "assistant", label: "yes" },
-  { input: "Thanks", expected: "assistant", label: "thanks" },
-  { input: "ok", expected: "assistant", label: "ok" },
 
   // --- Edge cases ---
   { input: "", expected: "assistant", label: "empty" },
