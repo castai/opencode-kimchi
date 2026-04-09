@@ -69,6 +69,33 @@ const cases: TestCase[] = [
   { input: "can you build me an app that would have similar capabilities like lovable? Complete copycat of lovable", expected: "planner", label: "lovable copycat" },
   { input: "build me an app similar to notion", expected: "planner", label: "build app similar to" },
   { input: "create a complete clone of airbnb", expected: "planner", label: "clone product" },
+
+  // --- Regression: "go" as verb should NOT trigger coder ---
+  { input: "I want to go to the store", expected: "assistant", label: "go-verb: to store" },
+  { input: "Let it go", expected: "assistant", label: "go-verb: let it go" },
+  { input: "Ready to go?", expected: "assistant", label: "go-verb: ready to go" },
+  { input: "Here we go again", expected: "assistant", label: "go-verb: here we go" },
+  { input: "I need to go back and check", expected: "assistant", label: "go-verb: go back" },
+
+  // --- Regression: "Go" as language SHOULD trigger coder ---
+  { input: "Write a Go HTTP server", expected: "coder", label: "Go-language: server" },
+  { input: "Implement the handler in golang", expected: "coder", label: "golang: handler" },
+
+  // --- Regression: "java" vs "javascript" ---
+  { input: "Write a Java class for the parser", expected: "coder", label: "java: class" },
+
+  // --- Regression: review with code blocks should stay reviewer ---
+  { input: "Review this code for bugs:\n```\nfunction foo() {}\n```", expected: "reviewer", label: "review+code: bugs" },
+  { input: "Security audit this endpoint:\n```\napp.post(\"/login\", (req, res) => { db.query(req.body.sql) })\n```", expected: "reviewer", label: "review+code: security audit" },
+  { input: "Any vulnerabilities in this?\n```python\nos.system(input())\n```", expected: "reviewer", label: "review+code: vulnerabilities" },
+  { input: "Is this implementation correct?\n```\nif (x > 0) return true;\n```", expected: "reviewer", label: "review+code: is correct" },
+  { input: "Code review the PR diff:\n```diff\n- old line\n+ new line\n```", expected: "reviewer", label: "review+code: PR diff" },
+
+  // --- Regression: "review for bugs" is review, not debug ---
+  { input: "Review this code for bugs", expected: "reviewer", label: "review-for-bugs" },
+
+  // --- Regression: file extension regex should not match inside compound extensions ---
+  // (Note: .tsconfig should NOT boost coder; verified via regex unit test)
 ];
 
 let passed = 0;

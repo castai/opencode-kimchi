@@ -1,6 +1,7 @@
 import pluginModule from "./index.js";
 import { _resetAll, getSession } from "./session-state.js";
 import { _resetAllCosts } from "./cost-tracker.js";
+import { _resetAllFallbacks, hasPendingFallback } from "./model-fallback.js";
 
 const MOCK_KIMCHI_CONFIG = {
   provider: {
@@ -245,9 +246,17 @@ async function test() {
   _resetAll();
   const kimchiAgentConfig: any = structuredClone(MOCK_KIMCHI_CONFIG);
   await hooks["config"]!(kimchiAgentConfig);
-  assert(kimchiAgentConfig.agent?.["kimchi-auto"]?.prompt?.includes("Delegate"), "kimchi-auto agent has delegation prompt");
-  assert(kimchiAgentConfig.agent?.["kimchi-auto"]?.prompt?.includes("@explore"), "kimchi-auto prompt mentions @explore");
-  assert(kimchiAgentConfig.agent?.["kimchi-auto"]?.prompt?.includes("@general"), "kimchi-auto prompt mentions @general");
+  const agentPrompt = kimchiAgentConfig.agent?.["kimchi-auto"]?.prompt ?? "";
+  assert(agentPrompt.includes("Delegation"), "kimchi-auto agent has delegation section");
+  assert(agentPrompt.includes("@explore"), "kimchi-auto prompt mentions @explore");
+  assert(agentPrompt.includes("@general"), "kimchi-auto prompt mentions @general");
+  assert(agentPrompt.includes("<intent-gate>"), "kimchi-auto prompt has intent gate");
+  assert(agentPrompt.includes("<codebase-first>"), "kimchi-auto prompt has codebase-first section");
+  assert(agentPrompt.includes("<testing>"), "kimchi-auto prompt has testing section");
+  assert(agentPrompt.includes("<verification>"), "kimchi-auto prompt has verification section");
+  assert(agentPrompt.includes("<guardrails>"), "kimchi-auto prompt has guardrails section");
+  assert(agentPrompt.includes("model-routing"), "kimchi-auto prompt has dynamic model context");
+  assert(agentPrompt.includes("kimi-k2.5"), "kimchi-auto prompt includes available model names");
 
   // =========================================================================
   // SLASH COMMAND OVERRIDES
@@ -328,8 +337,25 @@ async function test() {
 
   const compactOutput = { context: [] as string[], prompt: undefined as string | undefined };
   await hooks["experimental.session.compacting"]!({ sessionID: "s-compact" }, compactOutput);
-  assert(compactOutput.context.length === 1, "compaction injects routing context");
-  assert(compactOutput.context[0].includes("debugger"), "compaction context mentions active profile");
+  assert(compactOutput.context.length >= 1, "compaction injects routing context");
+  assert(compactOutput.context.some((c: string) => c.includes("debugger")), "compaction context mentions active profile");
+  assert(typeof compactOutput.prompt === "string", "compaction sets custom prompt");
+  assert(compactOutput.prompt!.includes("PRESERVE"), "compaction prompt has preservation guidance");
+  assert(compactOutput.prompt!.includes("OMIT"), "compaction prompt has omission guidance");
+
+  // Compaction with file tracking
+  _resetAll();
+  const compactSetup2 = makeOutput("s-compact2", "m51", "Implement the parser");
+  await hooks["chat.message"]!({ sessionID: "s-compact2", model: { providerID: "kimchi", modelID: "auto" } }, compactSetup2);
+  await hooks["tool.execute.after"]!({ tool: "edit", sessionID: "s-compact2", callID: "c1", args: { filePath: "/src/parser.ts" } }, { title: "", output: "ok", metadata: {} });
+  await hooks["tool.execute.after"]!({ tool: "read", sessionID: "s-compact2", callID: "c2", args: { filePath: "/src/utils.ts" } }, { title: "", output: "ok", metadata: {} });
+  await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "s-compact2", callID: "c3", args: {} }, { title: "", output: "error: TypeError cannot read", metadata: {} });
+
+  const compactOutput2 = { context: [] as string[], prompt: undefined as string | undefined };
+  await hooks["experimental.session.compacting"]!({ sessionID: "s-compact2" }, compactOutput2);
+  assert(compactOutput2.context.some((c: string) => c.includes("/src/parser.ts")), "compaction includes modified files");
+  assert(compactOutput2.context.some((c: string) => c.includes("/src/utils.ts")), "compaction includes read files");
+  assert(compactOutput2.context.some((c: string) => c.includes("error")), "compaction includes recent errors");
 
   // =========================================================================
   // MODE STICKINESS
@@ -342,6 +368,163 @@ async function test() {
   _resetAll();
   assert(await routeAndGetModel("s-sticky2", "m90", "Plan the architecture for the new auth system") === "kimi-k2.5", "stickiness: initial plan routes to reasoning");
   assert(await routeAndGetModel("s-sticky2", "m91", "Refactor the payment module to clean up the duplicated validation code") === "claude-sonnet-4-20250514", "stickiness: cross-tier refactor breaks out of planner");
+
+  // =========================================================================
+  // CONTEXT-AWARE MODEL SELECTION
+  // =========================================================================
+
+  // When context is small, quick tier resolves to minimax normally
+  _resetAll();
+  assert(await routeAndGetModel("s-ctx1", "m100", "What is this?") === "minimax-m2.5", "context-aware: small context uses minimax for quick");
+
+  // Simulate large context by updating context estimate via event
+  _resetAll();
+  await routeAndGetModel("s-ctx2", "m101", "What is this?");
+  // Simulate event with large input token count (exceeds minimax 196K)
+  await hooks["event"]!({ event: { type: "message.updated", properties: { info: { id: "m101", sessionID: "s-ctx2", role: "assistant", providerID: "kimchi", cost: 0.01, tokens: { input: 180000, output: 5000 } } } } as any });
+  const ctx2Session = getSession("s-ctx2");
+  assert(ctx2Session.estimatedContextTokens === 185000, "context estimate updated from event");
+
+  // Now route another quick message — context (185K) exceeds 85% of minimax (196K * 0.85 = 166K)
+  // so it should upgrade to a model with a larger context window
+  const quickOutput2 = makeOutput("s-ctx2", "m102", "What is the status?");
+  await hooks["chat.message"]!({ sessionID: "s-ctx2", model: { providerID: "kimchi", modelID: "auto" } }, quickOutput2);
+  const paramsCtx2 = { temperature: 0.5, topP: 1, topK: 0, options: {} as any };
+  await hooks["chat.params"]!(
+    { sessionID: "s-ctx2", agent: "build", model: { id: "auto", providerID: "kimchi" } as any, provider: {} as any, message: quickOutput2.message } as any,
+    paramsCtx2,
+  );
+  const upgradedModel = paramsCtx2.options?.model ?? "auto";
+  // Should upgrade to gpt-4.1-nano (1M context, quick tier priority 20) or kimi-k2.5 (262K, quick tier priority 40)
+  assert(upgradedModel !== "minimax-m2.5", "context-aware: upgrades away from minimax when context is large");
+  assert(upgradedModel === "gpt-4.1-nano" || upgradedModel === "kimi-k2.5", "context-aware: upgraded to a model with sufficient context window");
+
+  // Context well within limits should NOT trigger upgrade
+  _resetAll();
+  await routeAndGetModel("s-ctx3", "m103", "What is this?");
+  await hooks["event"]!({ event: { type: "message.updated", properties: { info: { id: "m103", sessionID: "s-ctx3", role: "assistant", providerID: "kimchi", cost: 0.001, tokens: { input: 50000, output: 2000 } } } } as any });
+  assert(await routeAndGetModel("s-ctx3", "m104", "What is the status?") === "minimax-m2.5", "context-aware: small context keeps minimax");
+
+  // =========================================================================
+  // MODEL FALLBACK ON ERROR
+  // =========================================================================
+
+  // APIError (500) should arm fallback
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb1", "m200", "Implement a new function to parse CSV files");
+  assert(getSession("s-fb1").activeProfile === "coder", "fallback: initial route is coder");
+
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb1",
+    error: { name: "APIError", data: { message: "Internal Server Error", statusCode: 500, isRetryable: true } },
+  }} as any });
+  assert(hasPendingFallback("s-fb1"), "fallback: pending fallback armed after APIError 500");
+
+  const fb1Model = await routeAndGetModel("s-fb1", "m201", "Implement a new function to parse CSV files");
+  assert(fb1Model !== "claude-sonnet-4-20250514", "fallback: switched away from failed model");
+  assert(!hasPendingFallback("s-fb1"), "fallback: pending cleared after application");
+
+  // APIError (400) should also be retryable
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb400", "m210", "Implement a function");
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb400",
+    error: { name: "APIError", data: { message: "Bad Request", statusCode: 400, isRetryable: true } },
+  }} as any });
+  assert(hasPendingFallback("s-fb400"), "fallback: 400 error arms fallback");
+
+  // ContextOverflowError should arm fallback
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb2", "m202", "What is this?");
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb2",
+    error: { name: "ContextOverflowError", data: { message: "Context too large" } },
+  }} as any });
+  assert(hasPendingFallback("s-fb2"), "fallback: pending fallback armed after ContextOverflowError");
+
+  // UnknownError should arm fallback
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb3", "m203", "Help me debug this");
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb3",
+    error: { name: "UnknownError", data: { message: "Something went wrong" } },
+  }} as any });
+  assert(hasPendingFallback("s-fb3"), "fallback: pending fallback armed after UnknownError");
+
+  // ProviderAuthError should NOT arm fallback
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb4", "m204", "Hello");
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb4",
+    error: { name: "ProviderAuthError", data: { providerID: "kimchi", message: "Invalid API key" } },
+  }} as any });
+  assert(!hasPendingFallback("s-fb4"), "fallback: ProviderAuthError does NOT arm fallback");
+
+  // MessageAbortedError should NOT arm fallback
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb5", "m205", "Hello");
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb5",
+    error: { name: "MessageAbortedError", data: { message: "User cancelled" } },
+  }} as any });
+  assert(!hasPendingFallback("s-fb5"), "fallback: MessageAbortedError does NOT arm fallback");
+
+  // 401 Unauthorized should NOT arm fallback
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb6", "m206", "Hello");
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb6",
+    error: { name: "APIError", data: { message: "Unauthorized", statusCode: 401, isRetryable: false } },
+  }} as any });
+  assert(!hasPendingFallback("s-fb6"), "fallback: 401 does NOT arm fallback");
+
+  // 403 Forbidden should NOT arm fallback
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb7", "m207", "Hello");
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb7",
+    error: { name: "APIError", data: { message: "Forbidden", statusCode: 403, isRetryable: false } },
+  }} as any });
+  assert(!hasPendingFallback("s-fb7"), "fallback: 403 does NOT arm fallback");
+
+  // Successful message clears fallback state
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb8", "m208", "Implement X");
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb8",
+    error: { name: "APIError", data: { message: "Server Error", statusCode: 500, isRetryable: true } },
+  }} as any });
+  assert(hasPendingFallback("s-fb8"), "fallback: armed after error");
+  await routeAndGetModel("s-fb8", "m209", "Implement X");
+  await hooks["event"]!({ event: { type: "message.updated", properties: { info: {
+    id: "m209", sessionID: "s-fb8", role: "assistant", providerID: "kimchi",
+    cost: 0.01, tokens: { input: 1000, output: 500 }, finish: true,
+  }}} as any });
+  assert(!hasPendingFallback("s-fb8"), "fallback: cleared after successful finished message");
+
+  // Streaming update (no finish flag) should NOT clear fallback state
+  _resetAll();
+  _resetAllFallbacks();
+  await routeAndGetModel("s-fb9", "m210x", "Write a function to sort arrays");
+  await hooks["event"]!({ event: { type: "session.error", properties: {
+    sessionID: "s-fb9",
+    error: { name: "APIError", data: { message: "Server Error", statusCode: 500, isRetryable: true } },
+  }} as any });
+  assert(hasPendingFallback("s-fb9"), "fallback: armed before streaming update");
+  await hooks["event"]!({ event: { type: "message.updated", properties: { info: {
+    id: "m211x", sessionID: "s-fb9", role: "assistant", providerID: "kimchi",
+    cost: 0.005, tokens: { input: 500, output: 200 },
+  }}} as any });
+  assert(hasPendingFallback("s-fb9"), "fallback: NOT cleared by streaming update without finish flag");
 
   // =========================================================================
   // DEFENSIVE: MISSING/UNDEFINED FIELDS DON'T CRASH

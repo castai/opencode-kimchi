@@ -25,6 +25,7 @@ interface SessionTracker {
 }
 
 const sessions = new Map<string, SessionTracker>();
+const MAX_COST_SESSIONS = 200;
 
 function emptySessionCost(): SessionCost {
   return {
@@ -42,6 +43,10 @@ function emptySessionCost(): SessionCost {
 function getTracker(sessionID: string): SessionTracker {
   let tracker = sessions.get(sessionID);
   if (!tracker) {
+    if (sessions.size >= MAX_COST_SESSIONS) {
+      const oldest = sessions.keys().next().value!;
+      sessions.delete(oldest);
+    }
     tracker = { cost: emptySessionCost(), seen: new Map() };
     sessions.set(sessionID, tracker);
   }
@@ -66,6 +71,10 @@ export function recordMessageCost(
   outputTokens: number,
   agent?: string,
 ): void {
+  cost = Math.max(0, cost);
+  inputTokens = Math.max(0, inputTokens);
+  outputTokens = Math.max(0, outputTokens);
+
   const tracker = getTracker(sessionID);
   const session = tracker.cost;
   const prev = tracker.seen.get(messageID);

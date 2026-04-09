@@ -15,6 +15,11 @@ import {
   setActiveProfile,
   setActiveAgent,
   incrementLiveSignal,
+  updateContextEstimate,
+  resetContextEstimate,
+  trackFileModified,
+  trackFileRead,
+  trackToolError,
 } from "./session-state.js";
 import {
   getAgentRouting,
@@ -23,8 +28,8 @@ import {
 } from "./agent-router.js";
 import {
   KIMCHI_AGENT_NAME,
-  KIMCHI_AGENT_PROMPT,
   KIMCHI_AGENT_DESCRIPTION,
+  buildKimchiAutoPrompt,
 } from "./kimchi-agent.js";
 import { routingTools } from "./tools.js";
 import { buildTelemetryConfig, createTelemetry } from "./telemetry.js";
@@ -35,13 +40,26 @@ import {
   formatSessionCost,
 } from "./cost-tracker.js";
 import { classifyWithLlm } from "./llm-classifier.js";
+import {
+  buildCompactionContext,
+  buildCompactionPrompt,
+  shouldTriggerProactiveCompaction,
+  triggerProactiveCompaction,
+} from "./compaction.js";
+import {
+  onSessionError,
+  hasPendingFallback,
+  getNextFallbackModel,
+  consumePendingFallback,
+  clearFallbackState,
+} from "./model-fallback.js";
 
 const KIMCHI_PROVIDER = "kimchi";
 const CASTAI_LLM_BASE = "https://llm.cast.ai/openai/v1";
 
 const EDIT_TOOLS = new Set(["write", "edit", "patch", "bash", "shell", "file_write", "file_edit"]);
 const READ_TOOLS = new Set(["read", "glob", "grep", "search", "find", "file_read"]);
-const ERROR_PATTERN = /error|exception|failed|traceback/i;
+const ERROR_PATTERN = /\b(?:error|exception|failed|traceback)\b(?![\s-]*(?:handling|handler|boundary|boundaries|recovery|message|code|type|class))/i;
 
 const TIER_TO_PROFILE: Record<ModelTier, ProfileID> = {
   reasoning: "planner",
@@ -70,6 +88,13 @@ function getModelID(input: Record<string, any>): string | undefined {
 
 function getSessionID(input: Record<string, any>): string | undefined {
   return input.sessionID ?? undefined;
+}
+
+function extractFilePath(args: any): string | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const raw = args.filePath ?? args.file ?? args.path ?? args.filename;
+  if (typeof raw === "string" && raw.length > 0) return raw;
+  return undefined;
 }
 
 function parseCommand(text: string): { profile: ProfileID; sticky: boolean } | "auto" | "kimchi" | null {
@@ -308,19 +333,24 @@ const plugin: Plugin = async (ctx, options) => {
 
       if (!config.agent) config.agent = {};
 
+      const subagentNames = ["explore", "general"];
+      const dynamicPrompt = buildKimchiAutoPrompt({
+        registry,
+        providerID,
+        subagents: subagentNames,
+      });
+
       if (!config.agent[KIMCHI_AGENT_NAME]) {
         config.agent[KIMCHI_AGENT_NAME] = {
           model: autoModel,
           mode: "primary",
-          prompt: KIMCHI_AGENT_PROMPT,
+          prompt: dynamicPrompt,
           description: KIMCHI_AGENT_DESCRIPTION,
           color: "accent",
         };
       }
 
-      if (!config.default_agent) {
-        config.default_agent = KIMCHI_AGENT_NAME;
-      }
+      config.default_agent = KIMCHI_AGENT_NAME;
 
       if (!config.model) {
         config.model = autoModel;
@@ -376,6 +406,22 @@ const plugin: Plugin = async (ctx, options) => {
         const text = extractText(output?.parts);
         const sessionID = getSessionID(input as any);
         if (!sessionID) return;
+
+        if (hasPendingFallback(sessionID)) {
+          const fallbackModel = getNextFallbackModel(sessionID, registry);
+          const fallbackState = consumePendingFallback(sessionID);
+          if (fallbackModel && fallbackState) {
+            const profileId = TIER_TO_PROFILE[fallbackModel.tier];
+            setActiveProfile(sessionID, profileId);
+            recordDecision(sessionID, { profile: profileId, source: `fallback: ${fallbackState.failedModelID} → ${fallbackModel.id}` });
+            output.message.model = { providerID, modelID: fallbackModel.id };
+            log(verbose, `fallback: ${fallbackState.failedModelID} failed, switching to ${fallbackModel.id}`);
+            showRouting(client, profileId, fallbackModel.id, fallbackModel.tier, `fallback: ${fallbackState.failedModelID} failed`);
+            return;
+          }
+          log(verbose, `fallback chain exhausted for session ${sessionID}, no more models to try`);
+          clearFallbackState(sessionID);
+        }
 
         const command = parseCommand(text);
         if (command === "auto") {
@@ -557,8 +603,28 @@ const plugin: Plugin = async (ctx, options) => {
           const session = getSession(sessionID);
           if (session.activeProfile) {
             const activeProfile = profiles[session.activeProfile];
+            let resolvedModel = activeProfile.model;
+
+            if (session.estimatedContextTokens > 0) {
+              const modelEntry = registry.get(resolvedModel);
+              const contextLimit = modelEntry?.contextWindow ?? 128_000;
+              const usageRatio = session.estimatedContextTokens / contextLimit;
+
+              if (usageRatio > 0.85) {
+                const upgrade = registry.findModelForContext(
+                  activeProfile.tier,
+                  session.estimatedContextTokens,
+                );
+                if (upgrade && upgrade.id !== resolvedModel) {
+                  log(verbose, `context ${session.estimatedContextTokens} tokens exceeds 85% of ${resolvedModel} (${contextLimit}), upgrading to ${upgrade.id} (${upgrade.contextWindow})`);
+                  resolvedModel = upgrade.id;
+                  showRouting(client, activeProfile.id, resolvedModel, activeProfile.tier, `context-upgrade: ${resolvedModel}`);
+                }
+              }
+            }
+
             output.temperature = activeProfile.temperature;
-            output.options = { ...output.options, model: activeProfile.model };
+            output.options = { ...output.options, model: resolvedModel };
             return;
           }
         }
@@ -578,14 +644,33 @@ const plugin: Plugin = async (ctx, options) => {
     "tool.execute.after": async (input, output) => {
       try {
         const toolName = (input.tool ?? "").toLowerCase();
+        const filePath = extractFilePath(input.args);
+
         if (EDIT_TOOLS.has(toolName)) {
           incrementLiveSignal(input.sessionID, "edits");
+          if (filePath) trackFileModified(input.sessionID, filePath);
         }
         if (READ_TOOLS.has(toolName)) {
           incrementLiveSignal(input.sessionID, "reads");
+          if (filePath) trackFileRead(input.sessionID, filePath);
         }
         if (ERROR_PATTERN.test(output.output ?? "")) {
           incrementLiveSignal(input.sessionID, "errors");
+          const errorLine = (output.output ?? "").split("\n").find((l: string) => ERROR_PATTERN.test(l));
+          if (errorLine) trackToolError(input.sessionID, errorLine.trim());
+        }
+
+        const session = getSession(input.sessionID);
+        const activeProfile = session.activeProfile ? profiles[session.activeProfile] : null;
+        if (shouldTriggerProactiveCompaction(input.sessionID, session.estimatedContextTokens, registry, activeProfile)) {
+          log(verbose, `context at ${Math.round(session.estimatedContextTokens / 1000)}K tokens, triggering proactive compaction`);
+          showRouting(client, session.activeProfile ?? "assistant", "compacting", activeProfile?.tier ?? "coding", "proactive-compaction");
+          triggerProactiveCompaction(
+            input.sessionID,
+            client,
+            ctx.directory,
+            (msg) => log(verbose, msg),
+          ).catch(() => {});
         }
       } catch (err) {
         log(verbose, `tool.execute.after error: ${err}`);
@@ -595,17 +680,11 @@ const plugin: Plugin = async (ctx, options) => {
     "experimental.session.compacting": async (input, output) => {
       try {
         const session = getSession(input.sessionID);
-        if (session.activeProfile) {
-          const modeHistory = session.history
-            .slice(-5)
-            .map((h) => h.profile)
-            .join(" → ");
-          output.context.push(
-            `[Model routing: mode=${session.activeProfile}, ` +
-            `activity: ${session.liveSignals.edits} edits, ${session.liveSignals.reads} reads, ` +
-            `${session.liveSignals.errors} errors. History: ${modeHistory}]`,
-          );
+        const contextLines = buildCompactionContext(session, profiles);
+        for (const line of contextLines) {
+          output.context.push(line);
         }
+        output.prompt = buildCompactionPrompt();
       } catch (err) {
         log(verbose, `session.compacting error: ${err}`);
       }
@@ -613,8 +692,51 @@ const plugin: Plugin = async (ctx, options) => {
 
     event: async ({ event }) => {
       try {
-        if (event.type !== "message.updated") return;
         const props = (event as any).properties;
+
+        if (event.type === "session.compacted") {
+          const sessionID = props?.sessionID as string | undefined;
+          if (sessionID) {
+            resetContextEstimate(sessionID);
+            log(verbose, `context estimate reset after compaction for session ${sessionID}`);
+          }
+          return;
+        }
+
+        if (event.type === "session.error") {
+          const sessionID = props?.sessionID as string | undefined;
+          const error = props?.error as { name: string; data: Record<string, unknown> } | undefined;
+          if (!sessionID || !error) return;
+
+          const session = getSession(sessionID);
+          const activeTier = session.activeProfile
+            ? profiles[session.activeProfile]?.tier ?? "coding"
+            : "coding";
+          const currentModel = session.activeProfile
+            ? profiles[session.activeProfile]?.model ?? "unknown"
+            : "unknown";
+
+          const armed = onSessionError(sessionID, error, currentModel, activeTier);
+          if (armed) {
+            const nextModel = getNextFallbackModel(sessionID, registry);
+            log(verbose, `session.error: ${error.name} on ${currentModel}, fallback armed → ${nextModel?.id ?? "exhausted"}`);
+            if (nextModel) {
+              client?.tui?.showToast({
+                body: {
+                  title: "Kimchi: Model error",
+                  message: `${currentModel} failed (${error.name}), will retry with ${nextModel.id}`,
+                  variant: "warning" as const,
+                  duration: 5000,
+                },
+              }).catch(() => {});
+            }
+          } else {
+            log(verbose, `session.error: ${error.name} on ${currentModel}, not retryable`);
+          }
+          return;
+        }
+
+        if (event.type !== "message.updated") return;
         if (!props?.info) return;
 
         const info = props.info;
@@ -627,15 +749,26 @@ const plugin: Plugin = async (ctx, options) => {
           ? profiles[session.activeProfile]?.tier ?? "coding"
           : "coding";
 
+        const inputTokens = info.tokens?.input ?? 0;
+        const outputTokens = info.tokens?.output ?? 0;
+
         recordMessageCost(
           info.sessionID,
           info.id,
           activeTier,
           info.cost ?? 0,
-          info.tokens?.input ?? 0,
-          info.tokens?.output ?? 0,
+          inputTokens,
+          outputTokens,
           session.activeAgent ?? undefined,
         );
+
+        if (inputTokens > 0) {
+          updateContextEstimate(info.sessionID, inputTokens + outputTokens);
+        }
+
+        if (info.sessionID && !info.error && info.finish) {
+          clearFallbackState(info.sessionID);
+        }
       } catch (err) {
         log(verbose, `event error: ${err}`);
       }

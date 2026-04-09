@@ -236,6 +236,37 @@ export class ModelRegistry {
     this.rebuildTierPriority();
   }
 
+  getContextLimit(tier: ModelTier): number {
+    const model = this.getForTier(tier);
+    return model?.contextWindow ?? 128_000;
+  }
+
+  getSmallestContextLimit(): number {
+    let smallest = Infinity;
+    for (const model of this.available.values()) {
+      if (model.contextWindow < smallest) {
+        smallest = model.contextWindow;
+      }
+    }
+    return smallest === Infinity ? 128_000 : smallest;
+  }
+
+  findModelForContext(tier: ModelTier, contextTokens: number, headroomRatio = 0.85): KimchiModel | undefined {
+    const needed = contextTokens / headroomRatio;
+    const candidates = this.getAllForTier(tier);
+    const fits = candidates.find((m) => m.contextWindow >= needed);
+    if (fits) return fits;
+
+    for (const fallbackTier of ["coding", "reasoning", "quick"] as ModelTier[]) {
+      if (fallbackTier === tier) continue;
+      const fallbackCandidates = this.getAllForTier(fallbackTier);
+      const fallbackFit = fallbackCandidates.find((m) => m.contextWindow >= needed);
+      if (fallbackFit) return fallbackFit;
+    }
+
+    return undefined;
+  }
+
   getMostExpensiveModel(): KimchiModel | undefined {
     let most: KimchiModel | undefined;
     let highestCost = 0;

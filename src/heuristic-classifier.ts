@@ -36,10 +36,13 @@ const DEBUG_SIGNALS: RegExp[] = [
 const REVIEW_SIGNALS: RegExp[] = [
   /\b(review|audit|critique|evaluate)\b.*\b(code|change|pr|pull request|commit|diff)\b/i,
   /\b(code review|security (review|audit|scan|check))\b/i,
-  /\b(is this (correct|safe|secure|right|ok)|any (issues|problems|vulnerabilities))\b/i,
+  /\b(is this\b.{0,30}\b(correct|safe|secure|right|ok)\b|any (issues|problems|vulnerabilities))\b/i,
   /\b(look over|check (for|my)|give.+feedback)\b/i,
   /\b(pull request|pr)\b.*\b(review|check|look)\b/i,
   /\b(OWASP|XSS|SQL injection|injection|vulnerability|CVE)\b/i,
+  // "review/check/audit ... for bugs/issues/problems" — review intent, not debugging
+  /\b(review|check|audit)\b.*\b(for)\b.*\b(bugs?|issues?|problems?|errors?|vulnerabilities?)\b/i,
+  /\b(any)\b.*\b(bugs?|issues?|problems?|vulnerabilities?)\b.*\b(in|with)\b/i,
 ];
 
 const REFACTOR_SIGNALS: RegExp[] = [
@@ -77,7 +80,11 @@ const CODER_SIGNALS: RegExp[] = [
   /\b(commit|merge|rebase|cherry-?pick|squash)\b/i,
   /\bcreate\b.*\b(file|directory|folder|project|repo)\b/i,
   /```[\s\S]*```/,
-  /\b(typescript|javascript|python|go|rust|java|css|html|sql|graphql|yaml|json|toml)\b/i,
+  // Language names — "go" requires capitalization or "golang" to avoid matching the verb;
+  // "java" requires word-end boundary to avoid matching inside "javascript"
+  /\b(typescript|javascript|python|golang|rust|css|html|sql|graphql|yaml|json|toml)\b/i,
+  /\bGo\b(?!\s+(to|ahead|back|for|on|with|through|over|away|home|now|there|here|out|up|down|into))/,
+  /\bjava\b(?!script)/i,
 ];
 
 // Exploration patterns now folded into assistant (quick tier)
@@ -110,12 +117,19 @@ export function classifyWithHeuristics(text: string): ClassificationResult {
     return { profile: "assistant", confidence: 0.5, reason: "empty message" };
   }
 
+  // Detect review/security intent early — when present, code blocks are context (not coder intent)
+  const hasReviewIntent = countSignals(text, REVIEW_SIGNALS) > 0;
+
+  // When review intent is present, score coder signals on the prose only (strip code blocks)
+  // so that language names and patterns inside pasted code don't inflate the coder score.
+  const textForCoder = hasReviewIntent ? text.replace(/```[\s\S]*?```/g, "") : text;
+
   const scores: ScoredProfile[] = [
     { profile: "debugger",   score: countSignals(text, DEBUG_SIGNALS)    * 2.0 },
     { profile: "reviewer",   score: countSignals(text, REVIEW_SIGNALS)   * 1.8 },
     { profile: "refactorer", score: countSignals(text, REFACTOR_SIGNALS) * 1.7 },
     { profile: "planner",    score: countSignals(text, PLANNER_SIGNALS)  * 1.5 },
-    { profile: "coder",      score: countSignals(text, CODER_SIGNALS)    * 1.3 },
+    { profile: "coder",      score: countSignals(textForCoder, CODER_SIGNALS) * 1.3 },
     { profile: "assistant",  score: countSignals(text, ASSISTANT_SIGNALS) * 0.8 },
   ];
 
@@ -125,17 +139,28 @@ export function classifyWithHeuristics(text: string): ClassificationResult {
   if (text.length < 80) {
     addScore(scores, "assistant", 0.2);
   }
-  if (/\.(ts|js|py|go|rs|java|tsx|jsx|css|html|sql|yaml|json|toml|md)/.test(text)) {
+
+  if (/\.(tsx|jsx|json|ts|js|py|go|rs|java|css|html|sql|yaml|toml|md)(?![a-zA-Z])/.test(text)) {
     addScore(scores, "coder", 0.1);
   }
   if (/```/.test(text)) {
-    addScore(scores, "coder", 0.15);
+    if (hasReviewIntent) {
+      // Code block is context for review — boost review, don't boost coder
+      addScore(scores, "reviewer", 0.2);
+    } else {
+      addScore(scores, "coder", 0.15);
+    }
   }
   if (/\b(exception|traceback|crash(es|ed|ing)?|bug(s|gy)?|TypeError|ReferenceError|SyntaxError)\b/i.test(text)) {
-    addScore(scores, "debugger", 0.3);
+    // Don't boost debugger when the intent is review ("review for bugs")
+    if (!hasReviewIntent) {
+      addScore(scores, "debugger", 0.3);
+    }
   }
   if (/\berror\b/i.test(text) && !/\berror (handling|message|code|type|class|boundary)/i.test(text)) {
-    addScore(scores, "debugger", 0.2);
+    if (!hasReviewIntent) {
+      addScore(scores, "debugger", 0.2);
+    }
   }
 
   scores.sort((a, b) => b.score - a.score);

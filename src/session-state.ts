@@ -29,6 +29,12 @@ export interface LiveSignals {
   errors: number;
 }
 
+export interface SessionActivity {
+  filesModified: Set<string>;
+  filesRead: Set<string>;
+  toolErrors: string[];
+}
+
 export interface SessionState {
   override: ManualOverride | null;
   nextTierSuggestion: ModelTier | null;
@@ -36,12 +42,23 @@ export interface SessionState {
   activeAgent: string | null;
   signals: ConversationSignals | null;
   liveSignals: LiveSignals;
+  activity: SessionActivity;
   history: RoutingDecision[];
+  estimatedContextTokens: number;
 }
 
 const sessions = new Map<string, SessionState>();
 
+const MAX_SESSIONS = 200;
 const MAX_HISTORY = 20;
+
+function defaultActivity(): SessionActivity {
+  return {
+    filesModified: new Set(),
+    filesRead: new Set(),
+    toolErrors: [],
+  };
+}
 
 function defaultState(): SessionState {
   return {
@@ -51,13 +68,19 @@ function defaultState(): SessionState {
     activeAgent: null,
     signals: null,
     liveSignals: { edits: 0, reads: 0, errors: 0 },
+    activity: defaultActivity(),
     history: [],
+    estimatedContextTokens: 0,
   };
 }
 
 export function getSession(sessionID: string): SessionState {
   let state = sessions.get(sessionID);
   if (!state) {
+    if (sessions.size >= MAX_SESSIONS) {
+      const oldest = sessions.keys().next().value!;
+      sessions.delete(oldest);
+    }
     state = defaultState();
     sessions.set(sessionID, state);
   }
@@ -113,6 +136,44 @@ export function incrementLiveSignal(
 ): void {
   const state = getSession(sessionID);
   state.liveSignals[signal] += amount;
+}
+
+const MAX_TRACKED_FILES = 50;
+const MAX_TOOL_ERRORS = 10;
+
+export function trackFileModified(sessionID: string, filePath: string): void {
+  const state = getSession(sessionID);
+  if (state.activity.filesModified.size < MAX_TRACKED_FILES) {
+    state.activity.filesModified.add(filePath);
+  }
+}
+
+export function trackFileRead(sessionID: string, filePath: string): void {
+  const state = getSession(sessionID);
+  if (state.activity.filesRead.size < MAX_TRACKED_FILES) {
+    state.activity.filesRead.add(filePath);
+  }
+}
+
+export function trackToolError(sessionID: string, errorSnippet: string): void {
+  const state = getSession(sessionID);
+  if (state.activity.toolErrors.length < MAX_TOOL_ERRORS) {
+    state.activity.toolErrors.push(errorSnippet.slice(0, 200));
+  }
+}
+
+export function updateContextEstimate(sessionID: string, inputTokens: number): void {
+  const state = getSession(sessionID);
+  if (inputTokens > state.estimatedContextTokens) {
+    state.estimatedContextTokens = inputTokens;
+  }
+}
+
+export function resetContextEstimate(sessionID: string): void {
+  const state = sessions.get(sessionID);
+  if (state) {
+    state.estimatedContextTokens = 0;
+  }
 }
 
 export function recordDecision(sessionID: string, decision: Omit<RoutingDecision, "timestamp">): void {

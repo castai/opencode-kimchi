@@ -39,9 +39,11 @@ export function shouldSkipClassification(agentName: string): boolean {
 }
 
 const DELEGATION_GUIDANCE = [
-  "When a task involves exploring the codebase, searching for files, or locating definitions, delegate to @explore rather than doing it yourself — it runs on a cheaper model with isolated context.",
-  "For research tasks requiring multiple steps or gathering information from several sources, delegate to @general.",
-  "Delegation preserves your context window and uses cost-optimized models for focused tasks.",
+  "You are an orchestrator. Your DEFAULT behavior is to DELEGATE work rather than doing it yourself.",
+  "Delegate to @explore for codebase searches, file lookups, and pattern discovery — it runs on a cheaper model with isolated context.",
+  "Delegate to @general for research tasks requiring multiple steps or gathering information from several sources.",
+  "Delegate via task() for implementation work — write a detailed prompt with TASK, EXPECTED OUTCOME, MUST DO, MUST NOT DO, and file paths.",
+  "Only do work directly when it's a trivial single-file change. Delegation preserves your context window and uses cost-optimized models.",
 ].join(" ");
 
 export function getDelegationGuidance(): string {
@@ -49,10 +51,13 @@ export function getDelegationGuidance(): string {
 }
 
 const TASK_TOOL_ENHANCEMENT = [
-  "Spawn a focused subagent for a specific task.",
-  "Delegation is preferred when: the task is self-contained, involves codebase search/exploration, or requires multi-step investigation.",
-  "Subagents run in isolated context with cost-optimized models, preserving the main conversation's context window.",
-  "Available subagents: @explore (fast read-only codebase search), @general (research and multi-step tasks).",
+  "DELEGATE implementation work to a subagent rather than doing it yourself.",
+  "This is the PRIMARY way you should execute multi-step work — each subagent gets its own context window and a cost-optimized model.",
+  "Use task() for: implementing features, writing tests, refactoring code, fixing bugs across multiple files.",
+  "Use @explore for: finding files, searching patterns, understanding codebase structure.",
+  "Use @general for: research, investigation, gathering context from multiple sources.",
+  "Write a detailed prompt with: TASK, EXPECTED OUTCOME, MUST DO, MUST NOT DO, and CONTEXT (file paths, patterns to follow).",
+  "After the task completes, VERIFY the result before reporting to the user.",
 ].join(" ");
 
 export function getTaskToolEnhancement(): string {
