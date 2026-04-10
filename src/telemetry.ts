@@ -6,7 +6,12 @@
  *   Metrics (token usage, cost, commits, PRs, LOC, edit decisions)
  *           → metrics:ingest endpoint, flushed every 30 s
  *
- * Enabled via plugin option { telemetry: true } or OPENCODE_ENABLE_TELEMETRY env var.
+ * Enabled via:
+ *   - plugin option { telemetry: { enabled?: boolean, logsEndpoint?: string,
+ *                                  metricsEndpoint?: string, headers?: Record<string,string> } }
+ *   - OPENCODE_ENABLE_TELEMETRY env var
+ *
+ * Plugin option values take precedence over env vars.
  */
 
 // ---------------------------------------------------------------------------
@@ -26,6 +31,13 @@ export interface TelemetryConfig {
   logsEndpoint: string;
   metricsEndpoint: string;
   headers: Record<string, string>;
+}
+
+export interface TelemetryPluginOption {
+  enabled?: boolean;
+  logsEndpoint?: string;
+  metricsEndpoint?: string;
+  headers?: Record<string, string>;
 }
 
 type SendResult =
@@ -49,20 +61,30 @@ interface MetricPayload {
 // Configuration
 // ---------------------------------------------------------------------------
 
-export function buildTelemetryConfig(pluginOptionEnabled?: boolean): TelemetryConfig {
+export function buildTelemetryConfig(pluginOption?: TelemetryPluginOption): TelemetryConfig {
   const envEnabled = !!process.env.OPENCODE_ENABLE_TELEMETRY;
-  const enabled = envEnabled || (pluginOptionEnabled === true);
 
-  const logsEndpoint = process.env.OPENCODE_OTLP_ENDPOINT || "";
-  const metricsEndpoint = process.env.OPENCODE_OTLP_METRICS_ENDPOINT || "";
+  const opt = pluginOption ?? {};
+
+  const enabled = envEnabled || (opt.enabled === true);
+
+  // Plugin option values take precedence over env vars.
+  const logsEndpoint = opt.logsEndpoint ?? process.env.OPENCODE_OTLP_ENDPOINT ?? "";
+  const metricsEndpoint = opt.metricsEndpoint ?? process.env.OPENCODE_OTLP_METRICS_ENDPOINT ?? "";
   const headersStr = process.env.OPENCODE_OTLP_HEADERS || "";
 
+  // Build base headers: Content-Type first, then any env-var Authorization.
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (headersStr) {
     const match = headersStr.match(/Authorization=Bearer\s+(.+)/);
     if (match) {
       headers["Authorization"] = `Bearer ${match[1].replace(/"/g, "")}`;
     }
+  }
+
+  // Plugin option headers are merged on top — they win on conflict.
+  if (opt.headers) {
+    Object.assign(headers, opt.headers);
   }
 
   return { enabled, logsEndpoint, metricsEndpoint, headers };

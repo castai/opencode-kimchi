@@ -39,7 +39,7 @@ import {
   buildKimchiAutoPrompt,
 } from "./kimchi-agent.js";
 import { routingTools } from "./tools.js";
-import { buildTelemetryConfig, createTelemetry } from "./telemetry.js";
+import { buildTelemetryConfig, createTelemetry, TelemetryPluginOption } from "./telemetry.js";
 import {
   recordMessageCost,
 } from "./cost-tracker.js";
@@ -240,7 +240,7 @@ const plugin: Plugin = async (ctx, options) => {
   const llmClassifierThreshold = (options?.llmClassifierThreshold as number) ?? 0.5;
   let apiKey = (options?.apiKey as string) ?? process.env.CASTAI_API_KEY;
 
-  const telemetryConfig = buildTelemetryConfig(options?.telemetry as boolean | undefined);
+  const telemetryConfig = buildTelemetryConfig(options?.telemetry as TelemetryPluginOption | undefined);
   const telemetry = createTelemetry(telemetryConfig, ctx.client as any);
 
   return {
@@ -893,4 +893,4 @@ export { KIMCHI_AGENT_NAME } from "./kimchi-agent.js";
 export type { ProfileID, AgentProfile } from "./profiles.js";
 export type { ModelTier, KimchiModel } from "./model-registry.js";
 export type { ConversationPhase, PhaseDetectionResult } from "./phase-detector.js";
-export type { TelemetryConfig, TelemetryClient, Telemetry } from "./telemetry.js";
+export type { TelemetryConfig, TelemetryClient, Telemetry, TelemetryPluginOption } from "./telemetry.js";
