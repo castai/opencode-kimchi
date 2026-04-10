@@ -229,6 +229,10 @@ const plugin: Plugin = async (ctx, options) => {
     registry.applyOverrides(options.models as Partial<Record<ModelTier, string>>);
   }
 
+  if (options?.priorities) {
+    registry.applyPriorityOverrides(options.priorities as Record<string, Partial<Record<ModelTier, number>>>);
+  }
+
   let profiles = resolveProfiles(registry);
 
   const llmBaseUrl = (options?.llmBaseUrl as string) ?? CASTAI_LLM_BASE;

@@ -643,6 +643,45 @@ async function test() {
   }
   assert(!crashed, "chat.message does not crash with missing sessionID");
 
+  // =========================================================================
+  // PRIORITY OVERRIDES
+  // =========================================================================
+
+  // Create a fresh plugin instance with priority overrides: minimax-m2.5 gets quick priority 1
+  // (lower than kimi-k2.5's quick priority of 12), so minimax-m2.5 should win the quick tier.
+  // But since primary agents floor quick→coding, we test via a subagent (e.g. "title") that
+  // uses quick tier directly.
+  _resetAll();
+  const hooksWithPriorities = await pluginModule.server(mockCtx, {
+    priorities: { "minimax-m2.5": { quick: 1 } },
+  });
+  await hooksWithPriorities["config"]!(structuredClone(MOCK_KIMCHI_CONFIG) as any);
+
+  // Use the "title" subagent which routes directly to quick tier (no floor)
+  async function routeWithPrioritiesHooks(
+    sessionID: string,
+    msgID: string,
+    text: string,
+    agent: string,
+  ): Promise<string> {
+    const output = makeOutput(sessionID, msgID, text);
+    const input: any = { sessionID, model: { providerID: "kimchi", modelID: "auto" }, agent };
+    await hooksWithPriorities["chat.message"]!(input, output);
+    const paramsOutput = { temperature: 0.5, topP: 1, topK: 0, options: {} as any };
+    await hooksWithPriorities["chat.params"]!(
+      { sessionID, agent, model: { id: "auto", providerID: "kimchi" } as any, provider: {} as any, message: output.message } as any,
+      paramsOutput,
+    );
+    return paramsOutput.options?.model ?? "auto";
+  }
+
+  // minimax-m2.5 has quick priority 1 (override) vs kimi-k2.5 quick priority 12 (MODEL_PLACEMENTS)
+  // so quick tier should resolve to minimax-m2.5
+  assert(
+    await routeWithPrioritiesHooks("s-prio1", "mp1", "Generate a title", "title") === "minimax-m2.5",
+    "priority override: minimax-m2.5 at quick priority 1 wins over kimi-k2.5 at priority 12",
+  );
+
   console.log(`\nPlugin tests: ${passed} passed, ${failed} failed out of ${passed + failed}`);
   if (failed > 0) process.exit(1);
 }

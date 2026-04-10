@@ -52,15 +52,16 @@ interface TierPlacement {
  *
  * Reasoning — ranked by SWE-bench, GPQA, AIME, with cost-efficiency preference:
  *   Opus family > o3 > o4-mini > Kimi K2.5 (96% AIME / 76.8% SWE, $0.60/$3.00) >
- *   o3-mini > Gemini 2.5 Pro
+ *   o3-mini > Nemotron-3-Super-FP4 (GPQA 79.4, RULER 256K 96%, $0.30/$0.75) >
+ *   Gemini 2.5 Pro
  *
  * Coding — ranked by performance/cost ratio:
  *   Kimi K2.5 (76.8% SWE, $0.60/$3.00) > Sonnet family > GPT-4.1 >
- *   Gemini 2.5 Flash > Minimax M2.5 (80.2% SWE, $0.30/$1.20) > GPT-4.1 Mini
+ *   Gemini 2.5 Flash > Minimax M2.5 (80.2% SWE, $0.30/$1.20) >
+ *   Nemotron-3-Super-FP4 (LCB v5 80.6%, 1M ctx, $0.30/$0.75) > GPT-4.1 Mini
  *
  * Quick — ranked by cost-effectiveness:
- *   Kimi K2.5 ($0.60/$3.00) > Minimax M2.5 ($0.30/$1.20) > GPT-4.1 Nano ($0.10/$0.40) >
- *   Gemini 2.0 Flash ($0.10/$0.40) > Haiku 4.5 ($1/$5)
+ *   Minimax M2.5 (10) > GPT-4.1 Nano (20) > Gemini 2.0 Flash (30) > Kimi K2.5 (40) > Haiku 4.5 (50)
  */
 const MODEL_PLACEMENTS: Record<string, TierPlacement[]> = {
   // ── Anthropic Opus — reasoning ──────────────────────────────────────
@@ -80,15 +81,25 @@ const MODEL_PLACEMENTS: Record<string, TierPlacement[]> = {
   "o3-mini":                        [{ tier: "reasoning", priority: 40 }],
   "o3-mini-2025-01-31":             [{ tier: "reasoning", priority: 40 }],
 
+  // ── NVIDIA Nemotron-3-Super-FP4: GPQA 79.4, RULER 256K 96%, $0.30/$0.75, 1M ctx
+  // Primary: reasoning (cost-optimised secondary after o3-mini).
+  // Also placed in coding: LiveCodeBench v5 80.6%, 1M context useful for large repos.
+  "nemotron-3-super-fp4": [
+    { tier: "reasoning", priority: 45 },
+    { tier: "coding",    priority: 45 },
+  ],
+
   // ── Google reasoning ────────────────────────────────────────────────
   "gemini-2.5-pro":                 [{ tier: "reasoning", priority: 50 }],
   "gemini-2.5-pro-preview-05-06":   [{ tier: "reasoning", priority: 50 }],
 
   // ── Kimi K2.5: 76.8% SWE, 96% AIME, $0.60/$3.00 — all three tiers
+  // Quick priority 40 (below GPT-4.1 Nano at 20 and Gemini 2.0 Flash at 30): Kimi is stronger
+  // but more expensive; for quick/lookup tasks cost-effectiveness takes precedence over raw capability.
   "kimi-k2.5": [
-    { tier: "reasoning", priority: 35 },
-    { tier: "coding",    priority: 8 },
-    { tier: "quick",     priority: 5 },
+    { tier: "reasoning", priority: 60 },
+    { tier: "coding",    priority: 25 },
+    { tier: "quick",     priority: 40 },
   ],
 
   // ── Anthropic Sonnet — coding ───────────────────────────────────────
@@ -129,10 +140,12 @@ const MODEL_PLACEMENTS: Record<string, TierPlacement[]> = {
 export class ModelRegistry {
   private available: Map<string, KimchiModel>;
   private tierPriority: Map<ModelTier, KimchiModel[]>;
+  private priorityOverrides: Map<string, Partial<Record<ModelTier, number>>>;
 
   constructor() {
     this.available = new Map();
     this.tierPriority = new Map();
+    this.priorityOverrides = new Map();
   }
 
   /**
@@ -145,11 +158,41 @@ export class ModelRegistry {
 
     for (const model of this.available.values()) {
       const placements = MODEL_PLACEMENTS[model.id];
+      const overrides = this.priorityOverrides.get(model.id);
+
       if (placements) {
+        // Build a map of tier → priority from MODEL_PLACEMENTS, then apply overrides
+        const tierPriorityMap = new Map<ModelTier, number>();
         for (const p of placements) {
-          const list = grouped.get(p.tier) ?? [];
-          list.push({ model, priority: p.priority });
-          grouped.set(p.tier, list);
+          tierPriorityMap.set(p.tier, p.priority);
+        }
+        // Apply overrides: update existing tiers or add new ones
+        if (overrides) {
+          for (const [tier, priority] of Object.entries(overrides) as [ModelTier, number][]) {
+            if (priority !== undefined) {
+              tierPriorityMap.set(tier, priority);
+            }
+          }
+        }
+        for (const [tier, priority] of tierPriorityMap) {
+          const list = grouped.get(tier) ?? [];
+          list.push({ model, priority });
+          grouped.set(tier, list);
+        }
+      } else if (overrides) {
+        // No MODEL_PLACEMENTS entry, but overrides exist — add to specified tiers
+        for (const [tier, priority] of Object.entries(overrides) as [ModelTier, number][]) {
+          if (priority !== undefined) {
+            const list = grouped.get(tier) ?? [];
+            list.push({ model, priority });
+            grouped.set(tier, list);
+          }
+        }
+        // Also place in the model's primary tier if not already covered by overrides
+        if (!(model.tier in overrides)) {
+          const list = grouped.get(model.tier) ?? [];
+          list.push({ model, priority: 999 });
+          grouped.set(model.tier, list);
         }
       } else {
         const list = grouped.get(model.tier) ?? [];
@@ -230,6 +273,22 @@ export class ModelRegistry {
       if (existing) {
         this.available.delete(existing.id);
         this.available.set(modelId, { ...existing, tier: tier as ModelTier });
+      }
+    }
+    this.rebuildTierPriority();
+  }
+
+  /**
+   * Apply user-configurable priority overrides for specific models in specific tiers.
+   * Overrides are merged with MODEL_PLACEMENTS — they do not replace the entire placement.
+   * If a model has no MODEL_PLACEMENTS entry for a tier but an override is provided,
+   * the model is added to that tier at the override priority.
+   * Call this after loadFromConfig() to ensure models are available.
+   */
+  applyPriorityOverrides(overrides: Record<string, Partial<Record<ModelTier, number>>>): void {
+    for (const [modelId, tierOverrides] of Object.entries(overrides)) {
+      if (tierOverrides && Object.keys(tierOverrides).length > 0) {
+        this.priorityOverrides.set(modelId, tierOverrides);
       }
     }
     this.rebuildTierPriority();
