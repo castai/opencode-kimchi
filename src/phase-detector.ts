@@ -6,12 +6,12 @@
  * structural signals across the conversation: tool call patterns, message
  * lengths, content characteristics, and transition keywords.
  *
- * 7 phases mapped to 7 profiles:
+ * 7 phases mapped to 6 profiles:
  *   discussion    -> planner     (architecture, trade-offs)
  *   implementation -> coder      (writing new code)
  *   debugging     -> debugger    (root cause analysis, fixing errors)
  *   reviewing     -> reviewer    (code review, security audit)
- *   exploring     -> explorer    (finding files, navigating codebase)
+ *   exploring     -> assistant   (finding files, navigating codebase)
  *   refactoring   -> refactorer  (restructuring existing code)
  *   qa            -> assistant   (quick questions, confirmations)
  *
@@ -226,7 +226,7 @@ export function detectPhase(
     if (!IMPLEMENT_KEYWORDS.test(latestUserText) && !PLAN_KEYWORDS.test(latestUserText)) {
       return {
         phase: "exploring",
-        profile: "explorer",
+        profile: "assistant",
         confidence: 0.7,
         reason: "phase: exploring (exploration keywords)",
       };
@@ -236,7 +236,7 @@ export function detectPhase(
   if (signals.recentReadToolCalls >= 3 && signals.recentEditToolCalls === 0) {
     return {
       phase: "exploring",
-      profile: "explorer",
+      profile: "assistant",
       confidence: 0.65,
       reason: `phase: exploring (${signals.recentReadToolCalls} read tool calls, no edits)`,
     };

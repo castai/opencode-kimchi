@@ -195,14 +195,14 @@ function mkSignals(overrides: Partial<ConversationSignals>): ConversationSignals
   const signals = mkSignals({});
   const result = detectPhase(signals, "Where is the database configuration?");
   assert(result.phase === "exploring", "detectPhase: 'where is' -> exploring");
-  assert(result.profile === "explorer", "detectPhase: locate -> explorer profile");
+  assert(result.profile === "assistant", "detectPhase: locate -> assistant profile");
 }
 
 {
   const signals = mkSignals({ recentReadToolCalls: 5 });
   const result = detectPhase(signals, "Keep looking around");
   assert(result.phase === "exploring", "detectPhase: heavy read tools -> exploring");
-  assert(result.profile === "explorer", "detectPhase: read-heavy -> explorer profile");
+  assert(result.profile === "assistant", "detectPhase: read-heavy -> assistant profile");
 }
 
 // --- Refactoring phase ---

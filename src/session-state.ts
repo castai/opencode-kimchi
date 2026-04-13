@@ -1,72 +1,92 @@
-/**
- * Per-session state management.
- *
- * Tracks the current profile, manual overrides, conversation history summary,
- * and routing decisions for each session.
- */
-
 import type { ProfileID } from "./profiles.js";
+import type { ModelTier } from "./model-registry.js";
 
 export interface ManualOverride {
   profile: ProfileID;
-  sticky: boolean; // true = locked until /auto, false = one-shot
+  sticky: boolean;
 }
 
 export interface RoutingDecision {
   profile: ProfileID;
-  source: string; // e.g. "phase:implementation", "override:plan", "heuristic:coding"
+  source: string;
   timestamp: number;
 }
 
 export interface ConversationSignals {
-  /** Number of tool calls in recent messages */
   recentToolCalls: number;
-  /** Number of file-editing tool calls (write, edit, patch, bash) */
   recentEditToolCalls: number;
-  /** Number of read-only tool calls (read, glob, grep) */
   recentReadToolCalls: number;
-  /** Average length of recent user messages */
   avgUserMsgLength: number;
-  /** Average length of recent assistant messages */
   avgAssistantMsgLength: number;
-  /** Code block count in recent messages */
   codeBlockCount: number;
-  /** Number of messages mentioning errors/exceptions/crashes */
   errorMentions: number;
-  /** Total message count in conversation */
   totalMessages: number;
 }
 
+export interface LiveSignals {
+  edits: number;
+  reads: number;
+  errors: number;
+}
+
+export interface SessionActivity {
+  filesModified: Set<string>;
+  filesRead: Set<string>;
+  toolErrors: string[];
+  directToolCalls: number;
+  delegationToolCalls: number;
+  reminderInjected: boolean;
+}
+
 export interface SessionState {
-  /** Active manual override (slash commands) */
   override: ManualOverride | null;
-  /** Profile suggested by LLM self-routing tool for next turn */
-  nextProfileSuggestion: ProfileID | null;
-  /** Currently active profile (set by chat.message, read by system.transform) */
+  nextTierSuggestion: ModelTier | null;
   activeProfile: ProfileID | null;
-  /** Latest conversation signals (updated by messages.transform hook) */
+  activeAgent: string | null;
   signals: ConversationSignals | null;
-  /** Recent routing decisions (capped at 20) */
+  liveSignals: LiveSignals;
+  activity: SessionActivity;
   history: RoutingDecision[];
+  estimatedContextTokens: number;
 }
 
 const sessions = new Map<string, SessionState>();
 
+const MAX_SESSIONS = 200;
 const MAX_HISTORY = 20;
+
+function defaultActivity(): SessionActivity {
+  return {
+    filesModified: new Set(),
+    filesRead: new Set(),
+    toolErrors: [],
+    directToolCalls: 0,
+    delegationToolCalls: 0,
+    reminderInjected: false,
+  };
+}
 
 function defaultState(): SessionState {
   return {
     override: null,
-    nextProfileSuggestion: null,
+    nextTierSuggestion: null,
     activeProfile: null,
+    activeAgent: null,
     signals: null,
+    liveSignals: { edits: 0, reads: 0, errors: 0 },
+    activity: defaultActivity(),
     history: [],
+    estimatedContextTokens: 0,
   };
 }
 
 export function getSession(sessionID: string): SessionState {
   let state = sessions.get(sessionID);
   if (!state) {
+    if (sessions.size >= MAX_SESSIONS) {
+      const oldest = sessions.keys().next().value!;
+      sessions.delete(oldest);
+    }
     state = defaultState();
     sessions.set(sessionID, state);
   }
@@ -88,15 +108,15 @@ export function consumeOneShotOverride(sessionID: string): ManualOverride | null
   return override;
 }
 
-export function setNextProfileSuggestion(sessionID: string, profile: ProfileID | null): void {
+export function setNextTierSuggestion(sessionID: string, tier: ModelTier | null): void {
   const state = getSession(sessionID);
-  state.nextProfileSuggestion = profile;
+  state.nextTierSuggestion = tier;
 }
 
-export function consumeNextProfileSuggestion(sessionID: string): ProfileID | null {
+export function consumeNextTierSuggestion(sessionID: string): ModelTier | null {
   const state = getSession(sessionID);
-  const suggestion = state.nextProfileSuggestion;
-  state.nextProfileSuggestion = null;
+  const suggestion = state.nextTierSuggestion;
+  state.nextTierSuggestion = null;
   return suggestion;
 }
 
@@ -105,9 +125,94 @@ export function setActiveProfile(sessionID: string, profile: ProfileID): void {
   state.activeProfile = profile;
 }
 
+export function setActiveAgent(sessionID: string, agent: string | null): void {
+  const state = getSession(sessionID);
+  state.activeAgent = agent;
+}
+
 export function updateSignals(sessionID: string, signals: ConversationSignals): void {
   const state = getSession(sessionID);
   state.signals = signals;
+}
+
+export function incrementLiveSignal(
+  sessionID: string,
+  signal: keyof LiveSignals,
+  amount = 1,
+): void {
+  const state = getSession(sessionID);
+  state.liveSignals[signal] += amount;
+}
+
+const MAX_TRACKED_FILES = 50;
+const MAX_TOOL_ERRORS = 10;
+
+export function trackFileModified(sessionID: string, filePath: string): void {
+  const state = getSession(sessionID);
+  if (state.activity.filesModified.size < MAX_TRACKED_FILES) {
+    state.activity.filesModified.add(filePath);
+  }
+}
+
+export function trackFileRead(sessionID: string, filePath: string): void {
+  const state = getSession(sessionID);
+  if (state.activity.filesRead.size < MAX_TRACKED_FILES) {
+    state.activity.filesRead.add(filePath);
+  }
+}
+
+export function trackToolError(sessionID: string, errorSnippet: string): void {
+  const state = getSession(sessionID);
+  if (state.activity.toolErrors.length < MAX_TOOL_ERRORS) {
+    state.activity.toolErrors.push(errorSnippet.slice(0, 200));
+  }
+}
+
+export function trackDirectToolCall(sessionID: string): void {
+  const state = getSession(sessionID);
+  state.activity.directToolCalls++;
+}
+
+export function trackDelegationToolCall(sessionID: string): void {
+  const state = getSession(sessionID);
+  state.activity.delegationToolCalls++;
+  state.activity.reminderInjected = false;
+}
+
+export function shouldInjectDelegationReminder(sessionID: string): boolean {
+  const state = sessions.get(sessionID);
+  if (!state) return false;
+  if (state.activity.reminderInjected) return false;
+  if (state.activity.delegationToolCalls > 0) return false;
+  return state.activity.directToolCalls >= 3;
+}
+
+export function getDelegationRatio(sessionID: string): { direct: number; delegated: number } {
+  const state = sessions.get(sessionID);
+  if (!state) return { direct: 0, delegated: 0 };
+  return {
+    direct: state.activity.directToolCalls,
+    delegated: state.activity.delegationToolCalls,
+  };
+}
+
+export function markReminderInjected(sessionID: string): void {
+  const state = sessions.get(sessionID);
+  if (state) state.activity.reminderInjected = true;
+}
+
+export function updateContextEstimate(sessionID: string, inputTokens: number): void {
+  const state = getSession(sessionID);
+  if (inputTokens > state.estimatedContextTokens) {
+    state.estimatedContextTokens = inputTokens;
+  }
+}
+
+export function resetContextEstimate(sessionID: string): void {
+  const state = sessions.get(sessionID);
+  if (state) {
+    state.estimatedContextTokens = 0;
+  }
 }
 
 export function recordDecision(sessionID: string, decision: Omit<RoutingDecision, "timestamp">): void {
@@ -122,7 +227,6 @@ export function clearSession(sessionID: string): void {
   sessions.delete(sessionID);
 }
 
-/** For testing */
 export function _resetAll(): void {
   sessions.clear();
 }

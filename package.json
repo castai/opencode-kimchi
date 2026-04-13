@@ -19,7 +19,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node dist/heuristic-classifier.test.js && node dist/phase-detector.test.js && node dist/plugin.test.js",
+    "test": "tsc && node dist/heuristic-classifier.test.js && node dist/phase-detector.test.js && node dist/llm-classifier.test.js && node dist/plugin.test.js",
     "prepare": "npm run build"
   },
   "keywords": [

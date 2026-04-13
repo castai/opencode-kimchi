@@ -2,13 +2,23 @@
 
 Automatic model routing for [OpenCode](https://opencode.ai) using [Cast AI's Kimchi](https://github.com/castai/kimchi) models.
 
-The plugin analyzes each message and routes it to the best model for the task:
+The plugin analyzes each message and routes it to the most cost-effective model tier:
 
-| Role | Model | When |
-|------|-------|------|
-| **Reasoning** | kimi-k2.5 | Planning, architecture, research, complex analysis, trade-off evaluation |
-| **Coding** | glm-5-fp8 | Implementation, debugging, refactoring, writing tests |
-| **Quick** | minimax-m2.5 | Simple questions, lookups, summaries, short explanations |
+| Tier | When |
+|------|------|
+| **Reasoning** | Planning, architecture, debugging, code review, security audit |
+| **Coding** | Implementation, refactoring, writing tests |
+| **Quick** | Simple questions, lookups, summaries, codebase exploration |
+
+The model used for each tier is selected dynamically from whatever models you have configured in your Kimchi provider. The plugin ranks known models by benchmark performance and cost, then picks the best available one per tier. A single model can serve multiple tiers — for example, `kimi-k2.5` is ranked across all three, and `minimax-m2.5` covers both coding and quick.
+
+**Reasoning tier** (ranked by SWE-bench, GPQA, AIME): Claude Opus family → o3 → o4-mini → Kimi K2.5 → o3-mini → Gemini 2.5 Pro
+
+**Coding tier** (ranked by performance/cost): Kimi K2.5 → Claude Sonnet family → GPT-4.1 → Gemini 2.5 Flash → Minimax M2.5 → GPT-4.1 Mini
+
+**Quick tier** (ranked by cost-effectiveness): Kimi K2.5 → Minimax M2.5 → GPT-4.1 Nano → Gemini 2.0 Flash → Claude Haiku
+
+Unknown models are auto-assigned to a tier based on their `reasoning` flag and cost.
 
 ## Install
 
@@ -16,43 +26,68 @@ The plugin analyzes each message and routes it to the best model for the task:
 opencode plugin @castai/opencode-kimchi
 ```
 
-Or add manually to `opencode.json`:
-
-```json
-{
-  "plugin": ["@castai/opencode-kimchi"]
-}
-```
+That's it. The plugin auto-configures itself — no manual provider setup needed.
 
 ## How it works
 
-The plugin hooks into OpenCode's message pipeline and classifies each user message by analyzing:
+The plugin registers as a Kimchi provider and exposes virtual models:
 
-- **Keyword signals** — planning/research terms trigger reasoning, implementation/debug terms trigger coding, lookup/explain terms trigger quick
-- **Structural cues** — long messages boost reasoning, short messages boost quick, code blocks boost coding
-- **Confidence scoring** — when classification is ambiguous, defaults to the coding model (safest middle ground)
+- **`kimchi/auto`** — Default. Routes each message to the best model automatically.
+- **`kimchi/reasoning`** — Always use the reasoning model.
+- **`kimchi/coding`** — Always use the coding model.
+- **`kimchi/quick`** — Always use the quick/cheap model.
 
-Classification happens entirely client-side with zero latency — no extra API calls.
+When using `kimchi/auto`, classification uses a cascade approach:
 
-## Override commands
+1. **Heuristic classifier** (instant, free) — keyword signals and structural cues handle ~70% of messages with high confidence
+2. **LLM classifier** (fast, cheap) — when heuristics are ambiguous, the cheapest Kimchi model (minimax-m2.5) classifies the message in ~100 tokens
+3. **Conversation phase detection** — tool usage patterns, message lengths, and structural signals refine routing as the conversation progresses
+4. **Live tool tracking** — file edits, reads, and error patterns in tool output feed routing decisions in real-time
+5. **Mode stickiness** — once in a mode, stays there unless a high-confidence signal says otherwise
+6. **LLM self-routing** — the model itself can suggest switching tiers for the next message
 
-When you know what you need, override the auto-detection:
+## Agent profiles
 
-| Command | Effect |
-|---------|--------|
-| `/plan` | Use reasoning model for the next message |
-| `/code` | Use coding model for the next message |
-| `/quick` | Use quick model for the next message |
-| `/lock plan` | Lock to reasoning model until `/auto` |
-| `/lock code` | Lock to coding model until `/auto` |
-| `/lock quick` | Lock to quick model until `/auto` |
-| `/auto` | Resume automatic model selection |
+Each model tier maps to a specialized agent profile with a tailored system prompt:
 
-One-shot overrides (`/plan`, `/code`, `/quick`) apply to that message only — the next message goes back to auto-detection. Use `/lock` to stay on a specific model.
+| Profile | Tier | Behavior |
+|---------|------|----------|
+| `planner` | Reasoning | Step-by-step thinking, trade-off analysis, phase breakdown |
+| `debugger` | Reasoning | Scientific method: observe → hypothesize → test → verify |
+| `reviewer` | Reasoning | Constructive criticism: bugs, security (OWASP), performance, edge cases |
+| `coder` | Coding | Complete implementation, no stubs, follows existing conventions |
+| `refactorer` | Coding | Behavior-preserving transformations, one change type at a time |
+| `assistant` | Quick | Concise and direct, terse answers, file lookups |
+
+Profiles are activated automatically based on routing.
+
+## Orchestration
+
+When running as `kimchi/auto`, the agent operates as an **orchestrator** — it plans, delegates, and verifies rather than doing all work directly:
+
+- Codebase exploration is delegated to `@explore` subagents
+- Multi-step research is delegated to `@general` subagents
+- Implementation work is delegated via `task()` with detailed prompts
+- Direct tool use is reserved for trivial single-file changes (< 20 lines)
+
+The plugin tracks direct vs. delegated tool calls and injects a reminder when the agent starts doing too much work itself instead of delegating.
+
+## Proactive context compaction
+
+When the conversation context exceeds 78% of the model's context window, the plugin automatically triggers a compaction — summarizing the conversation while preserving critical routing state:
+
+- Active mode and routing history
+- Files modified and read this session
+- Tool activity counts (edits, reads, errors)
+- Recent errors and user overrides
+
+This prevents context overflow without losing important session context.
+
+## Model fallback
+
+If a model request fails (rate limit, unavailability, etc.), the plugin automatically falls back to the next best model in the same tier, then across tiers if needed. Fallback state is tracked per session and cleared on success.
 
 ## Configuration
-
-Pass options via `opencode.json`:
 
 ```json
 {
@@ -60,16 +95,28 @@ Pass options via `opencode.json`:
     ["@castai/opencode-kimchi", {
       "provider": "kimchi",
       "verbose": true,
+      "models": {
+        "reasoning": "claude-opus-4-6",
+        "coding": "claude-sonnet-4-6",
+        "quick": "minimax-m2.5"
+      },
       "telemetry": true
     }]
   ]
 }
 ```
 
+The `models` override is optional — omit it and the plugin will automatically select the best available model per tier from your provider config.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `provider` | `"kimchi"` | Provider ID to route (matches your Kimchi provider config) |
-| `verbose` | `false` | Log model selection decisions to the chat |
+| `verbose` | `false` | Log model selection decisions |
+| `models` | *(auto)* | Override model IDs per tier |
+| `apiKey` | *(from provider config)* | CastAI API key (auto-read from your Kimchi provider config) |
+| `llmBaseUrl` | `https://llm.cast.ai/openai/v1` | LLM endpoint for classifier |
+| `llmClassifier` | `true` | Enable LLM fallback classifier for ambiguous messages |
+| `llmClassifierThreshold` | `0.5` | Confidence threshold below which LLM classifier is invoked |
 | `telemetry` | `false` | Enable usage telemetry (can also be enabled via env var) |
 
 ## Telemetry
@@ -124,7 +171,7 @@ export OPENCODE_OTLP_HEADERS="Authorization=Bearer YOUR_API_KEY_HERE"
 
 ## Requirements
 
-- [OpenCode](https://opencode.ai) with the `@opencode-ai/plugin` SDK
+- [OpenCode](https://opencode.ai) with `@opencode-ai/plugin` SDK ≥1.3.0
 - [Kimchi](https://github.com/castai/kimchi) configured with your Cast AI API key
 
 ## Development
@@ -133,6 +180,7 @@ export OPENCODE_OTLP_HEADERS="Authorization=Bearer YOUR_API_KEY_HERE"
 npm install
 npm run build
 npm run dev    # watch mode
+npm test       # run tests
 ```
 
 ## License

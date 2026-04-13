@@ -43,12 +43,16 @@ const cases: TestCase[] = [
   { input: "Give me feedback on this code — any problems?", expected: "reviewer", label: "code feedback" },
   { input: "Code review the authentication module", expected: "reviewer", label: "code review" },
 
-  // --- Explorer ---
-  { input: "Where is the database connection configured?", expected: "explorer", label: "find config" },
-  { input: "Find all files that import the UserService class", expected: "explorer", label: "find imports" },
-  { input: "How is the project directory structured?", expected: "explorer", label: "project structure" },
-  { input: "Which file handles the /api/auth route?", expected: "explorer", label: "find route handler" },
-  { input: "List all the API endpoints in the project", expected: "explorer", label: "list endpoints" },
+  // --- Assistant (now includes exploration) ---
+  { input: "Where is the database connection configured?", expected: "assistant", label: "find config" },
+  { input: "Find all files that import the UserService class", expected: "assistant", label: "find imports" },
+  { input: "How is the project directory structured?", expected: "assistant", label: "project structure" },
+  { input: "Which file handles the /api/auth route?", expected: "assistant", label: "find route handler" },
+  { input: "List all the API endpoints in the project", expected: "assistant", label: "list endpoints" },
+  { input: "What is a monad?", expected: "assistant", label: "what is" },
+  { input: "Yes", expected: "assistant", label: "yes" },
+  { input: "Thanks", expected: "assistant", label: "thanks" },
+  { input: "ok", expected: "assistant", label: "ok" },
 
   // --- Refactorer ---
   { input: "Refactor the payment module to use the strategy pattern", expected: "refactorer", label: "refactor pattern" },
@@ -56,12 +60,6 @@ const cases: TestCase[] = [
   { input: "Simplify the nested if-else in the auth middleware", expected: "refactorer", label: "simplify nesting" },
   { input: "Extract the common logic into a shared utility", expected: "refactorer", label: "extract utility" },
   { input: "Rename the variable from 'data' to something more descriptive", expected: "refactorer", label: "rename variable" },
-
-  // --- Assistant ---
-  { input: "What is a monad?", expected: "assistant", label: "what is" },
-  { input: "Yes", expected: "assistant", label: "yes" },
-  { input: "Thanks", expected: "assistant", label: "thanks" },
-  { input: "ok", expected: "assistant", label: "ok" },
 
   // --- Edge cases ---
   { input: "", expected: "assistant", label: "empty" },
@@ -71,6 +69,33 @@ const cases: TestCase[] = [
   { input: "can you build me an app that would have similar capabilities like lovable? Complete copycat of lovable", expected: "planner", label: "lovable copycat" },
   { input: "build me an app similar to notion", expected: "planner", label: "build app similar to" },
   { input: "create a complete clone of airbnb", expected: "planner", label: "clone product" },
+
+  // --- Regression: "go" as verb should NOT trigger coder ---
+  { input: "I want to go to the store", expected: "assistant", label: "go-verb: to store" },
+  { input: "Let it go", expected: "assistant", label: "go-verb: let it go" },
+  { input: "Ready to go?", expected: "assistant", label: "go-verb: ready to go" },
+  { input: "Here we go again", expected: "assistant", label: "go-verb: here we go" },
+  { input: "I need to go back and check", expected: "assistant", label: "go-verb: go back" },
+
+  // --- Regression: "Go" as language SHOULD trigger coder ---
+  { input: "Write a Go HTTP server", expected: "coder", label: "Go-language: server" },
+  { input: "Implement the handler in golang", expected: "coder", label: "golang: handler" },
+
+  // --- Regression: "java" vs "javascript" ---
+  { input: "Write a Java class for the parser", expected: "coder", label: "java: class" },
+
+  // --- Regression: review with code blocks should stay reviewer ---
+  { input: "Review this code for bugs:\n```\nfunction foo() {}\n```", expected: "reviewer", label: "review+code: bugs" },
+  { input: "Security audit this endpoint:\n```\napp.post(\"/login\", (req, res) => { db.query(req.body.sql) })\n```", expected: "reviewer", label: "review+code: security audit" },
+  { input: "Any vulnerabilities in this?\n```python\nos.system(input())\n```", expected: "reviewer", label: "review+code: vulnerabilities" },
+  { input: "Is this implementation correct?\n```\nif (x > 0) return true;\n```", expected: "reviewer", label: "review+code: is correct" },
+  { input: "Code review the PR diff:\n```diff\n- old line\n+ new line\n```", expected: "reviewer", label: "review+code: PR diff" },
+
+  // --- Regression: "review for bugs" is review, not debug ---
+  { input: "Review this code for bugs", expected: "reviewer", label: "review-for-bugs" },
+
+  // --- Regression: file extension regex should not match inside compound extensions ---
+  // (Note: .tsconfig should NOT boost coder; verified via regex unit test)
 ];
 
 let passed = 0;

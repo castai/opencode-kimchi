@@ -4,7 +4,7 @@
  * Used only when there is no conversation history for the phase detector to analyze.
  * Maps user message text to a ProfileID using keyword/pattern matching.
  *
- * 7 profiles: planner, coder, assistant, debugger, reviewer, explorer, refactorer
+ * 6 profiles: planner, coder, assistant, debugger, reviewer, refactorer
  */
 
 import type { ProfileID } from "./profiles.js";
@@ -36,10 +36,13 @@ const DEBUG_SIGNALS: RegExp[] = [
 const REVIEW_SIGNALS: RegExp[] = [
   /\b(review|audit|critique|evaluate)\b.*\b(code|change|pr|pull request|commit|diff)\b/i,
   /\b(code review|security (review|audit|scan|check))\b/i,
-  /\b(is this (correct|safe|secure|right|ok)|any (issues|problems|vulnerabilities))\b/i,
+  /\b(is this\b.{0,30}\b(correct|safe|secure|right|ok)\b|any (issues|problems|vulnerabilities))\b/i,
   /\b(look over|check (for|my)|give.+feedback)\b/i,
   /\b(pull request|pr)\b.*\b(review|check|look)\b/i,
   /\b(OWASP|XSS|SQL injection|injection|vulnerability|CVE)\b/i,
+  // "review/check/audit ... for bugs/issues/problems" — review intent, not debugging
+  /\b(review|check|audit)\b.*\b(for)\b.*\b(bugs?|issues?|problems?|errors?|vulnerabilities?)\b/i,
+  /\b(any)\b.*\b(bugs?|issues?|problems?|vulnerabilities?)\b.*\b(in|with)\b/i,
 ];
 
 const REFACTOR_SIGNALS: RegExp[] = [
@@ -48,14 +51,6 @@ const REFACTOR_SIGNALS: RegExp[] = [
   /\b(extract)\b.*\b(into|to|as)\b/i,
   /\b(dedup(licate)?|DRY|reduce (complexity|duplication|nesting))\b/i,
   /\b(improve (readability|structure|naming|organization))\b/i,
-];
-
-const EXPLORE_SIGNALS: RegExp[] = [
-  /\b(find|search|locate|look for|look up)\b.*\b(file|function|class|module|definition|usage|reference)\b/i,
-  /\b(where (is|are|does)|which (file|module|class|function))\b/i,
-  /\b(project structure|codebase|directory (structure|layout)|how is .+ (structured|organized))\b/i,
-  /\blist\b.*\b(files|functions|classes|endpoints|routes|modules|components|imports|exports|dependencies)\b/i,
-  /\b(navigate|grep|show me the)\b/i,
 ];
 
 const PLANNER_SIGNALS: RegExp[] = [
@@ -85,9 +80,14 @@ const CODER_SIGNALS: RegExp[] = [
   /\b(commit|merge|rebase|cherry-?pick|squash)\b/i,
   /\bcreate\b.*\b(file|directory|folder|project|repo)\b/i,
   /```[\s\S]*```/,
-  /\b(typescript|javascript|python|go|rust|java|css|html|sql|graphql|yaml|json|toml)\b/i,
+  // Language names — "go" requires capitalization or "golang" to avoid matching the verb;
+  // "java" requires word-end boundary to avoid matching inside "javascript"
+  /\b(typescript|javascript|python|golang|rust|css|html|sql|graphql|yaml|json|toml)\b/i,
+  /\bGo\b(?!\s+(to|ahead|back|for|on|with|through|over|away|home|now|there|here|out|up|down|into))/,
+  /\bjava\b(?!script)/i,
 ];
 
+// Exploration patterns now folded into assistant (quick tier)
 const ASSISTANT_SIGNALS: RegExp[] = [
   /\b(what is|what's|what are|where is|where's|show me|list|find)\b/i,
   /\b(explain|describe|summarize|tell me about)\b/i,
@@ -96,79 +96,98 @@ const ASSISTANT_SIGNALS: RegExp[] = [
   /\b(check|verify|confirm|look at|see if)\b/i,
   /\b(status|progress|state|current)\b/i,
   /\b(yes|no|ok|sure|thanks|thank you|got it)\b/i,
+  /\b(find|search|locate|look for|look up)\b.*\b(file|function|class|module|definition|usage|reference)\b/i,
+  /\b(where (is|are|does)|which (file|module|class|function))\b/i,
+  /\b(project structure|codebase|directory (structure|layout)|how is .+ (structured|organized))\b/i,
+  /\blist\b.*\b(files|functions|classes|endpoints|routes|modules|components|imports|exports|dependencies)\b/i,
+  /\b(navigate|grep|show me the)\b/i,
 ];
 
 interface ScoredProfile {
   profile: ProfileID;
   score: number;
+  keywordHits: number; // signals from keyword patterns (not length/contextual boosts)
 }
 
 function countSignals(text: string, patterns: RegExp[]): number {
   return patterns.filter((p) => p.test(text)).length;
 }
 
-/**
- * Classify a message using regex heuristics.
- * Always returns a result (never null). Used as first-message fallback.
- */
 export function classifyWithHeuristics(text: string): ClassificationResult {
   if (!text.trim()) {
     return { profile: "assistant", confidence: 0.5, reason: "empty message" };
   }
 
-  // Score each profile with weighted signals + structural boosts
+  // Detect review/security intent early — when present, code blocks are context (not coder intent)
+  const hasReviewIntent = countSignals(text, REVIEW_SIGNALS) > 0;
+
+  // When review intent is present, score coder signals on the prose only (strip code blocks)
+  // so that language names and patterns inside pasted code don't inflate the coder score.
+  const textForCoder = hasReviewIntent ? text.replace(/```[\s\S]*?```/g, "") : text;
+
+  const debugHits    = countSignals(text, DEBUG_SIGNALS);
+  const reviewHits   = countSignals(text, REVIEW_SIGNALS);
+  const refactorHits = countSignals(text, REFACTOR_SIGNALS);
+  const plannerHits  = countSignals(text, PLANNER_SIGNALS);
+  const coderHits    = countSignals(textForCoder, CODER_SIGNALS);
+  const assistantHits = countSignals(text, ASSISTANT_SIGNALS);
+
   const scores: ScoredProfile[] = [
-    { profile: "debugger",   score: countSignals(text, DEBUG_SIGNALS)    * 2.0 },
-    { profile: "reviewer",   score: countSignals(text, REVIEW_SIGNALS)   * 1.8 },
-    { profile: "refactorer", score: countSignals(text, REFACTOR_SIGNALS) * 1.7 },
-    { profile: "explorer",   score: countSignals(text, EXPLORE_SIGNALS)  * 1.5 },
-    { profile: "planner",    score: countSignals(text, PLANNER_SIGNALS)  * 1.5 },
-    { profile: "coder",      score: countSignals(text, CODER_SIGNALS)    * 1.3 },
-    { profile: "assistant",  score: countSignals(text, ASSISTANT_SIGNALS) * 0.8 },
+    { profile: "debugger",   score: debugHits    * 2.0, keywordHits: debugHits },
+    { profile: "reviewer",   score: reviewHits   * 1.8, keywordHits: reviewHits },
+    { profile: "refactorer", score: refactorHits * 1.7, keywordHits: refactorHits },
+    { profile: "planner",    score: plannerHits  * 1.5, keywordHits: plannerHits },
+    { profile: "coder",      score: coderHits    * 1.3, keywordHits: coderHits },
+    { profile: "assistant",  score: assistantHits * 0.8, keywordHits: assistantHits },
   ];
 
-  // Structural boosts
   if (text.length > 500) {
     addScore(scores, "planner", 0.15);
   }
   if (text.length < 80) {
     addScore(scores, "assistant", 0.2);
   }
-  if (/\.(ts|js|py|go|rs|java|tsx|jsx|css|html|sql|yaml|json|toml|md)/.test(text)) {
+
+  if (/\.(tsx|jsx|json|ts|js|py|go|rs|java|css|html|sql|yaml|toml|md)(?![a-zA-Z])/.test(text)) {
     addScore(scores, "coder", 0.1);
   }
   if (/```/.test(text)) {
-    addScore(scores, "coder", 0.15);
+    if (hasReviewIntent) {
+      // Code block is context for review — boost review, don't boost coder
+      addScore(scores, "reviewer", 0.2);
+    } else {
+      addScore(scores, "coder", 0.15);
+    }
   }
-  // Error indicators boost debugger — but only when the error is *happening*,
-  // not when the user is asking to "add error handling" or "error messages"
   if (/\b(exception|traceback|crash(es|ed|ing)?|bug(s|gy)?|TypeError|ReferenceError|SyntaxError)\b/i.test(text)) {
-    addScore(scores, "debugger", 0.3);
+    // Don't boost debugger when the intent is review ("review for bugs")
+    if (!hasReviewIntent) {
+      addScore(scores, "debugger", 0.3);
+    }
   }
   if (/\berror\b/i.test(text) && !/\berror (handling|message|code|type|class|boundary)/i.test(text)) {
-    addScore(scores, "debugger", 0.2);
+    if (!hasReviewIntent) {
+      addScore(scores, "debugger", 0.2);
+    }
   }
 
   scores.sort((a, b) => b.score - a.score);
   const top = scores[0];
   const second = scores[1];
   const total = scores.reduce((sum, s) => sum + s.score, 0);
-  // Confidence accounts for both relative gap AND absolute signal strength.
-  // A message with only a tiny structural boost (e.g. 0.2 from short message)
-  // should have low confidence even if it "wins" by default.
-  // This matters for mode stickiness: low-confidence detections don't break out of the current mode.
-  const relativeGap = total > 0 ? (top.score - second.score) / total : 0;
-  const absoluteStrength = Math.min(1.0, top.score / 1.5); // needs score >= 1.5 for full strength
-  const confidence = Math.min(0.95, 0.2 + relativeGap * 0.3 + absoluteStrength * 0.45);
 
-  // When ambiguous, default to coder (safest in a coding assistant)
-  if (confidence < 0.4 && top.profile !== "coder") {
-    return {
-      profile: "coder",
-      confidence: 0.4,
-      reason: "heuristic: ambiguous, defaulting to coder",
-    };
-  }
+  // Confidence formula:
+  //   relativeGap  — how dominant the winner is vs the runner-up
+  //   absoluteStrength — how many keyword signals matched (capped)
+  //   keywordPenalty — discount when the winner has no keyword matches
+  //     (score came entirely from contextual boosts like message length)
+  const relativeGap = total > 0 ? (top.score - second.score) / total : 0;
+  const absoluteStrength = Math.min(1.0, top.score / 1.5);
+  const hasKeywordEvidence = top.keywordHits > 0;
+  const confidence = Math.min(
+    0.95,
+    (hasKeywordEvidence ? 0.2 : 0.05) + relativeGap * 0.3 + absoluteStrength * 0.45,
+  );
 
   return {
     profile: top.profile,
