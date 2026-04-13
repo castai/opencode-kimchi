@@ -1,5 +1,5 @@
 {
-  "name": "@castai/opencode-kimchi",
+  "name": "@kimchi-dev/opencode-kimchi",
   "version": "1.0.0",
   "description": "Conversation-aware model routing for OpenCode using Cast AI's Kimchi models",
   "type": "module",

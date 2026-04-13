@@ -23,7 +23,7 @@ Unknown models are auto-assigned to a tier based on their `reasoning` flag and c
 ## Install
 
 ```bash
-opencode plugin @castai/opencode-kimchi
+opencode plugin @kimchi-dev/opencode-kimchi
 ```
 
 That's it. The plugin auto-configures itself — no manual provider setup needed.
@@ -92,7 +92,7 @@ If a model request fails (rate limit, unavailability, etc.), the plugin automati
 ```json
 {
   "plugin": [
-    ["@castai/opencode-kimchi", {
+    ["@kimchi-dev/opencode-kimchi", {
       "provider": "kimchi",
       "verbose": true,
       "models": {
@@ -130,7 +130,7 @@ Either set the plugin option:
 ```json
 {
   "plugin": [
-    ["@castai/opencode-kimchi", { "telemetry": true }]
+    ["@kimchi-dev/opencode-kimchi", { "telemetry": true }]
   ]
 }
 ```
