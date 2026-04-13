@@ -43,6 +43,7 @@ export interface SessionState {
   nextTierSuggestion: ModelTier | null;
   activeProfile: ProfileID | null;
   activeAgent: string | null;
+  selectedModel: string | null;
   signals: ConversationSignals | null;
   liveSignals: LiveSignals;
   activity: SessionActivity;
@@ -72,6 +73,7 @@ function defaultState(): SessionState {
     nextTierSuggestion: null,
     activeProfile: null,
     activeAgent: null,
+    selectedModel: null,
     signals: null,
     liveSignals: { edits: 0, reads: 0, errors: 0 },
     activity: defaultActivity(),
@@ -128,6 +130,23 @@ export function setActiveProfile(sessionID: string, profile: ProfileID): void {
 export function setActiveAgent(sessionID: string, agent: string | null): void {
   const state = getSession(sessionID);
   state.activeAgent = agent;
+}
+
+export function setSelectedModel(sessionID: string, model: string | null): void {
+  const state = getSession(sessionID);
+  state.selectedModel = model;
+}
+
+export function getSelectedModel(sessionID: string): string | null {
+  const state = sessions.get(sessionID);
+  return state?.selectedModel ?? null;
+}
+
+export function clearSelectedModel(sessionID: string): void {
+  const state = sessions.get(sessionID);
+  if (state) {
+    state.selectedModel = null;
+  }
 }
 
 export function updateSignals(sessionID: string, signals: ConversationSignals): void {

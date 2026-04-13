@@ -153,7 +153,8 @@ function buildModelContextSection(ctx: PromptContext): string {
   }
 
   lines.push("");
-  lines.push("You do NOT pick the model. Routing is automatic. Focus on the task.");
+  lines.push("When a specific model is requested via the API, you MUST use that exact model.");
+  lines.push("Otherwise, routing is automatic based on the task content. Focus on the task.");
   lines.push("</model-routing>");
   return lines.join("\n");
 }

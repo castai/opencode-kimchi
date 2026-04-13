@@ -14,6 +14,9 @@ import {
   recordDecision,
   setActiveProfile,
   setActiveAgent,
+  setSelectedModel,
+  getSelectedModel,
+  clearSelectedModel,
   incrementLiveSignal,
   updateContextEstimate,
   resetContextEstimate,
@@ -240,7 +243,7 @@ const plugin: Plugin = async (ctx, options) => {
   const llmClassifierThreshold = (options?.llmClassifierThreshold as number) ?? 0.5;
   let apiKey = (options?.apiKey as string) ?? process.env.CASTAI_API_KEY;
 
-  const telemetryConfig = buildTelemetryConfig(options?.telemetry as TelemetryPluginOption | undefined);
+  const telemetryConfig = buildTelemetryConfig({ ...(options as TelemetryPluginOption | undefined), apiKey }, verbose);
   const telemetry = createTelemetry(telemetryConfig, ctx.client as any);
 
   return {
@@ -363,6 +366,8 @@ const plugin: Plugin = async (ctx, options) => {
 
       if (providerConfig?.options?.apiKey) {
         apiKey = providerConfig.options.apiKey;
+        // Update telemetry config with the new API key
+        telemetryConfig.headers["Authorization"] = `Bearer ${apiKey}`;
       }
 
       const autoModel = `${providerID}/auto`;
@@ -436,12 +441,16 @@ const plugin: Plugin = async (ctx, options) => {
     "chat.message": async (input, output) => {
       try {
         const inputProviderID = getProviderID(input as any);
+        const inputModelID = getModelID(input as any);
+        log(verbose, `chat.message: inputProviderID=${inputProviderID}, inputModelID=${inputModelID}`);
         if (inputProviderID && inputProviderID !== providerID) {
+          log(verbose, `chat.message: provider mismatch, returning`);
           return;
         }
 
         const text = extractText(output?.parts);
         const sessionID = getSessionID(input as any);
+        log(verbose, `chat.message: sessionID=${sessionID}`);
         if (!sessionID) return;
 
         if (hasPendingFallback(sessionID)) {
@@ -463,6 +472,7 @@ const plugin: Plugin = async (ctx, options) => {
         const command = parseCommand(text);
         if (command === "auto") {
           setOverride(sessionID, null);
+          clearSelectedModel(sessionID);
           showRouting(client, "assistant", "auto", "auto", "override: auto", sessionID);
         } else if (command) {
           setOverride(sessionID, command);
@@ -473,19 +483,8 @@ const plugin: Plugin = async (ctx, options) => {
           setActiveAgent(sessionID, agentName);
         }
 
-        const agentRouting = agentName ? getAgentRouting(agentName) : undefined;
-        if (agentRouting && shouldSkipClassification(agentName!)) {
-          const tier = agentRouting.tier;
-          const model = registry.getForTier(tier);
-          const profileId = TIER_TO_PROFILE[tier];
-          setActiveProfile(sessionID, profileId);
-          recordDecision(sessionID, { profile: profileId, source: `agent: ${agentName} → ${tier}` });
-          log(verbose, `-> ${profileId} (agent: ${agentName})`);
-          showRouting(client, profileId, model?.id ?? tier, tier, `agent: ${agentName}`, sessionID);
-          return;
-        }
-
-        const inputModelID = getModelID(input as any);
+        // Check for explicit model selection FIRST (before agent routing)
+        // This ensures user-selected models take precedence over agent defaults
         const isTierSelect = inputModelID === "reasoning" || inputModelID === "coding" || inputModelID === "quick";
 
         if (isTierSelect) {
@@ -493,6 +492,9 @@ const plugin: Plugin = async (ctx, options) => {
           const model = registry.getForTier(tier);
           const profileId = TIER_TO_PROFILE[tier];
           setActiveProfile(sessionID, profileId);
+          if (model) {
+            setSelectedModel(sessionID, model.id);
+          }
           recordDecision(sessionID, { profile: profileId, source: `direct: ${tier}` });
           log(verbose, `-> ${profileId} (direct ${tier} selection)`);
           showRouting(client, profileId, model?.id ?? tier, tier, `direct: ${tier}`, sessionID);
@@ -502,12 +504,37 @@ const plugin: Plugin = async (ctx, options) => {
         const isAutoRouted = !inputModelID || inputModelID === "auto";
 
         if (!isAutoRouted) {
-          const knownModel = registry.get(inputModelID!);
+          // Strip provider prefix if present (e.g., "kimchi/minimax-m2.7" -> "minimax-m2.7")
+          const modelIdWithoutPrefix = inputModelID!.startsWith(`${providerID}/`)
+            ? inputModelID!.slice(providerID.length + 1)
+            : inputModelID!;
+          const knownModel = registry.get(modelIdWithoutPrefix);
+          log(verbose, `explicit model selection: input=${inputModelID}, stripped=${modelIdWithoutPrefix}, found=${knownModel?.id ?? 'null'}`);
           if (knownModel) {
-            const profileId = TIER_TO_PROFILE[knownModel.tier];
-            setActiveProfile(sessionID, profileId);
-            recordDecision(sessionID, { profile: profileId, source: `direct: ${inputModelID}` });
+            // Store the selected model and set output model
+            // DO NOT set activeProfile - this bypasses all routing logic
+            setSelectedModel(sessionID, knownModel.id);
+            log(verbose, `stored selected model: ${knownModel.id} for session ${sessionID}`);
+            output.message.model = { providerID, modelID: knownModel.id };
+            log(verbose, `-> direct model: ${knownModel.id} (bypassing all routing)`);
+            showRouting(client, "direct", knownModel.id, knownModel.tier, `direct: ${knownModel.id}`, sessionID);
+          } else {
+            log(verbose, `model not found in registry: ${modelIdWithoutPrefix}`);
           }
+          return;
+        }
+
+        // Agent routing for subagents (explore, general, title, summary, compaction)
+        // This runs AFTER explicit model selection, so user-selected models take precedence
+        const agentRouting = agentName ? getAgentRouting(agentName) : undefined;
+        if (agentRouting && shouldSkipClassification(agentName!)) {
+          const tier = agentRouting.tier;
+          const model = registry.getForTier(tier);
+          const profileId = TIER_TO_PROFILE[tier];
+          setActiveProfile(sessionID, profileId);
+          recordDecision(sessionID, { profile: profileId, source: `agent: ${agentName} → ${tier}` });
+          log(verbose, `-> ${profileId} (agent: ${agentName})`);
+          showRouting(client, profileId, model?.id ?? tier, tier, `agent: ${agentName}`, sessionID);
           return;
         }
 
@@ -596,7 +623,25 @@ const plugin: Plugin = async (ctx, options) => {
         setActiveProfile(sessionID, profile.id);
         recordDecision(sessionID, { profile: profile.id, source });
         log(verbose, `-> ${profile.label} | ${source}`);
-        showRouting(client, profile.id, profile.model, profile.tier, source, sessionID);
+        
+        // Check if there's a selected model that matches this profile's tier
+        // If so, use the selected model instead of the profile default
+        const selectedModel = getSelectedModel(sessionID);
+        log(verbose, `chat.message: selectedModel=${selectedModel}, profile.id=${profile.id}, profile.tier=${profile.tier}`);
+        let displayModel = profile.model;
+        if (selectedModel) {
+          const selectedModelEntry = registry.get(selectedModel);
+          log(verbose, `chat.message: selectedModelEntry=${selectedModelEntry?.id}, tier=${selectedModelEntry?.tier}`);
+          if (selectedModelEntry) {
+            const selectedModelProfile = TIER_TO_PROFILE[selectedModelEntry.tier];
+            log(verbose, `chat.message: selectedModelProfile=${selectedModelProfile}, profile.id=${profile.id}, match=${selectedModelProfile === profile.id}`);
+            if (selectedModelProfile === profile.id) {
+              displayModel = selectedModel;
+              log(verbose, `using selected model ${selectedModel} for profile ${profile.id}`);
+            }
+          }
+        }
+        showRouting(client, profile.id, displayModel, profile.tier, source, sessionID);
 
 
       } catch (err) {
@@ -660,14 +705,38 @@ const plugin: Plugin = async (ctx, options) => {
     "chat.params": async (input, output) => {
       try {
         const inputProviderID = getProviderID(input as any);
-        if (inputProviderID && inputProviderID !== providerID) return;
+        const inputModelID = getModelID(input as any);
+        log(verbose, `chat.params: inputProviderID=${inputProviderID}, inputModelID=${inputModelID}`);
+        if (inputProviderID && inputProviderID !== providerID) {
+          log(verbose, `chat.params: provider mismatch, returning`);
+          return;
+        }
 
         const sessionID = getSessionID(input as any);
+        log(verbose, `chat.params: sessionID=${sessionID}`);
+
+        // FIRST: Check if user explicitly selected a specific model
+        // If so, use it directly and bypass ALL routing logic
+        if (sessionID) {
+          const selectedModel = getSelectedModel(sessionID);
+          if (selectedModel) {
+            log(verbose, `chat.params: using explicitly selected model=${selectedModel} (bypassing all routing)`);
+            output.options = { ...output.options, model: selectedModel };
+            // Use default temperature since we're bypassing profile
+            output.temperature = 0.6;
+            log(verbose, `chat.params: output.options set with selected model, returning`);
+            return;
+          }
+        }
+
+        // SECOND: Fall back to profile-based routing (for auto/tier selections)
         if (sessionID) {
           const session = getSession(sessionID);
+          log(verbose, `chat.params: session found, activeProfile=${session.activeProfile}`);
           if (session.activeProfile) {
             const activeProfile = profiles[session.activeProfile];
             let resolvedModel = activeProfile.model;
+            log(verbose, `chat.params: resolvedModel=${resolvedModel}`);
 
             if (session.estimatedContextTokens > 0) {
               const modelEntry = registry.get(resolvedModel);
@@ -688,7 +757,9 @@ const plugin: Plugin = async (ctx, options) => {
             }
 
             output.temperature = activeProfile.temperature;
+            log(verbose, `chat.params: setting output.options.model=${resolvedModel}`);
             output.options = { ...output.options, model: resolvedModel };
+            log(verbose, `chat.params: output.options set, returning`);
             return;
           }
         }
@@ -708,6 +779,10 @@ const plugin: Plugin = async (ctx, options) => {
     "tool.execute.after": async (input, output) => {
       try {
         const toolName = (input.tool ?? "").toLowerCase();
+        await telemetry.handleToolAfter(
+          { tool: toolName, args: input.args as Record<string, unknown> },
+          { result: output.output }
+        );
         const filePath = extractFilePath(input.args);
 
         const trackingAgent = getSession(input.sessionID).activeAgent;
@@ -775,6 +850,7 @@ const plugin: Plugin = async (ctx, options) => {
     event: async ({ event }) => {
       try {
         const props = (event as any).properties;
+        await telemetry.handleEvent({ type: event.type, properties: props });
 
         if (event.type === "session.compacted") {
           const sessionID = props?.sessionID as string | undefined;

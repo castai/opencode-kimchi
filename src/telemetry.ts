@@ -31,13 +31,16 @@ export interface TelemetryConfig {
   logsEndpoint: string;
   metricsEndpoint: string;
   headers: Record<string, string>;
+  verbose?: boolean;
 }
 
 export interface TelemetryPluginOption {
-  enabled?: boolean;
+  telemetry?: boolean;
   logsEndpoint?: string;
   metricsEndpoint?: string;
   headers?: Record<string, string>;
+  verbose?: boolean;
+  apiKey?: string;
 }
 
 type SendResult =
@@ -61,12 +64,12 @@ interface MetricPayload {
 // Configuration
 // ---------------------------------------------------------------------------
 
-export function buildTelemetryConfig(pluginOption?: TelemetryPluginOption): TelemetryConfig {
+export function buildTelemetryConfig(pluginOption?: TelemetryPluginOption, pluginVerbose?: boolean): TelemetryConfig {
   const envEnabled = !!process.env.OPENCODE_ENABLE_TELEMETRY;
 
   const opt = pluginOption ?? {};
 
-  const enabled = envEnabled || (opt.enabled === true);
+  const enabled = envEnabled || (opt.telemetry === true);
 
   // Plugin option values take precedence over env vars.
   const logsEndpoint = opt.logsEndpoint ?? process.env.OPENCODE_OTLP_ENDPOINT ?? "";
@@ -75,10 +78,21 @@ export function buildTelemetryConfig(pluginOption?: TelemetryPluginOption): Tele
 
   // Build base headers: Content-Type first, then any env-var Authorization.
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (headersStr) {
+
+  // Use the same auth token as model API calls.
+  // Priority: plugin option apiKey > OPENCODE_OTLP_HEADERS > CASTAI_API_KEY env var
+  const apiKey = opt.apiKey;
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  } else if (headersStr) {
     const match = headersStr.match(/Authorization=Bearer\s+(.+)/);
     if (match) {
       headers["Authorization"] = `Bearer ${match[1].replace(/"/g, "")}`;
+    }
+  } else {
+    const castaiApiKey = process.env.CASTAI_API_KEY;
+    if (castaiApiKey) {
+      headers["Authorization"] = `Bearer ${castaiApiKey}`;
     }
   }
 
@@ -87,7 +101,9 @@ export function buildTelemetryConfig(pluginOption?: TelemetryPluginOption): Tele
     Object.assign(headers, opt.headers);
   }
 
-  return { enabled, logsEndpoint, metricsEndpoint, headers };
+  const verbose = opt.verbose ?? pluginVerbose ?? false;
+
+  return { enabled, logsEndpoint, metricsEndpoint, headers, verbose };
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +112,12 @@ export function buildTelemetryConfig(pluginOption?: TelemetryPluginOption): Tele
 
 function nowNano(): string {
   return String(Date.now() * 1_000_000);
+}
+
+function logVerbose(config: TelemetryConfig, message: string): void {
+  if (config.verbose) {
+    console.log(`[telemetry] ${message}`);
+  }
 }
 
 function strAttr(
@@ -159,7 +181,10 @@ async function sendLog(
   eventName: string,
   attrs: Record<string, string | number> = {},
 ): Promise<SendResult> {
-  if (!config.enabled || !config.logsEndpoint) return null;
+  if (!config.enabled || !config.logsEndpoint) {
+    logVerbose(config, `sendLog skipped: enabled=${config.enabled} logsEndpoint=${config.logsEndpoint}`);
+    return null;
+  }
 
   const now = nowNano();
 
@@ -197,6 +222,7 @@ async function sendLog(
   };
 
   try {
+    logVerbose(config, `Sending log to ${config.logsEndpoint} payload: ${JSON.stringify(payload)}`);
     const response = await fetch(config.logsEndpoint, {
       method: "POST",
       headers: config.headers,
@@ -204,10 +230,13 @@ async function sendLog(
     });
     if (!response.ok) {
       const body = await response.text();
+      logVerbose(config, `Log send failed: status=${response.status} body=${body}`);
       return { error: true, status: response.status, body };
     }
+    logVerbose(config, "Log sent successfully");
     return { error: false };
   } catch (err) {
+    logVerbose(config, `Log send error: ${err}`);
     return { error: true, message: String(err) };
   }
 }
@@ -221,7 +250,10 @@ async function sendMetrics(
   metrics: MetricPayload[],
   sessionStartNano: string,
 ): Promise<SendResult> {
-  if (!config.enabled || !config.metricsEndpoint) return null;
+  if (!config.enabled || !config.metricsEndpoint) {
+    logVerbose(config, `sendMetrics skipped: enabled=${config.enabled} metricsEndpoint=${config.metricsEndpoint}`);
+    return null;
+  }
 
   const now = nowNano();
 
@@ -261,6 +293,7 @@ async function sendMetrics(
   };
 
   try {
+    logVerbose(config, `Sending metrics to ${config.metricsEndpoint} payload: ${JSON.stringify(payload)}`);
     const response = await fetch(config.metricsEndpoint, {
       method: "POST",
       headers: config.headers,
@@ -268,10 +301,13 @@ async function sendMetrics(
     });
     if (!response.ok) {
       const body = await response.text();
+      logVerbose(config, `Metrics send failed: status=${response.status} body=${body}`);
       return { error: true, status: response.status, body };
     }
+    logVerbose(config, "Metrics sent successfully");
     return { error: false };
   } catch (err) {
+    logVerbose(config, `Metrics send error: ${err}`);
     return { error: true, message: String(err) };
   }
 }
@@ -281,10 +317,16 @@ async function sendMetrics(
 // ---------------------------------------------------------------------------
 
 async function showError(
+  config: TelemetryConfig,
   client: TelemetryClient | null,
   result: SendResult,
 ): Promise<void> {
-  if (!result || !result.error || !client) return;
+  if (!result || !result.error || !client) {
+    if (result && result.error) {
+      logVerbose(config, "Error not shown to user: client missing or result invalid");
+    }
+    return;
+  }
   let errorMsg =
     ("body" in result ? result.body : undefined) ||
     ("message" in result ? result.message : undefined) ||
@@ -295,6 +337,7 @@ async function showError(
   } catch {
     /* not JSON */
   }
+  logVerbose(config, `Showing error toast: ${errorMsg}`);
   await client.tui.showToast({
     body: { message: `OTEL: ${errorMsg}`, variant: "error" },
   });
@@ -356,12 +399,16 @@ export function createTelemetry(
     }, FLUSH_INTERVAL_MS);
   }
 
-  async function flushMetricsNow(): Promise<void> {
-    const metrics = buildCurrentMetrics();
-    if (metrics.length === 0) return;
-    const result = await sendMetrics(config, metrics, sessionStartNano);
-    await showError(client, result);
+async function flushMetricsNow(): Promise<void> {
+  const metrics = buildCurrentMetrics();
+  logVerbose(config, `Flushing metrics: ${JSON.stringify(metrics)}`);
+  if (metrics.length === 0) {
+    logVerbose(config, "No metrics to flush");
+    return;
   }
+  const result = await sendMetrics(config, metrics, sessionStartNano);
+  await showError(config, client, result);
+}
 
   function buildCurrentMetrics(): MetricPayload[] {
     const metrics: MetricPayload[] = [];
@@ -463,127 +510,140 @@ export function createTelemetry(
     return metrics;
   }
 
-  async function handleEvent(event: {
-    type: string;
-    properties?: Record<string, unknown>;
-  }): Promise<void> {
-    if (event.type === "session.created") {
-      const id =
+async function handleEvent(event: {
+  type: string;
+  properties?: Record<string, unknown>;
+}): Promise<void> {
+  logVerbose(config, `handleEvent called with type: ${event.type} properties: ${JSON.stringify(event.properties)}`);
+  
+  if (event.type === "session.created") {
+    const id =
+      (event.properties?.sessionID as string) ||
+      ((event.properties?.info as Record<string, unknown>)?.id as string);
+    if (id) {
+      logVerbose(config, `Session created with ID: ${id}`);
+      currentSessionID = id;
+      sessionStartNano = nowNano();
+      cumulativeCommits = 0;
+      cumulativePRs = 0;
+      cumulativeLinesAdded = 0;
+      cumulativeLinesRemoved = 0;
+      cumulativeEditDecisions = {};
+      cumulativeTokensByModel = {};
+      cumulativeCostByModel = {};
+    }
+    return;
+  }
+
+  // Flush on idle so metrics aren't lost if the user quits
+  if (event.type === "session.idle") {
+    logVerbose(config, "Session idle, flushing metrics");
+    await flushMetricsNow();
+    return;
+  }
+
+  if (event.type === "message.updated") {
+    const info =
+      (event.properties?.info as Record<string, unknown>) || {};
+
+    // Fallback: session.created may not fire in all environments
+    if (!currentSessionID) {
+      const sid =
         (event.properties?.sessionID as string) ||
-        ((event.properties?.info as Record<string, unknown>)?.id as string);
-      if (id) {
-        currentSessionID = id;
+        String(info.sessionID || "");
+      if (sid) {
+        logVerbose(config, `Setting session ID from message.updated: ${sid}`);
+        currentSessionID = sid;
         sessionStartNano = nowNano();
-        cumulativeCommits = 0;
-        cumulativePRs = 0;
-        cumulativeLinesAdded = 0;
-        cumulativeLinesRemoved = 0;
-        cumulativeEditDecisions = {};
-        cumulativeTokensByModel = {};
-        cumulativeCostByModel = {};
-      }
-      return;
-    }
-
-    // Flush on idle so metrics aren't lost if the user quits
-    if (event.type === "session.idle") {
-      await flushMetricsNow();
-      return;
-    }
-
-    if (event.type === "message.updated") {
-      const info =
-        (event.properties?.info as Record<string, unknown>) || {};
-
-      // Fallback: session.created may not fire in all environments
-      if (!currentSessionID) {
-        const sid =
-          (event.properties?.sessionID as string) ||
-          String(info.sessionID || "");
-        if (sid) {
-          currentSessionID = sid;
-          sessionStartNano = nowNano();
-        }
-      }
-
-      const time = (info.time as Record<string, number>) || {};
-      if (info.role === "assistant" && info.finish && time.completed) {
-        const messageId = String(info.id || "unknown");
-        if (sentMessages.has(messageId)) return;
-
-        sentMessages.add(messageId);
-        const tokens = (info.tokens as Record<string, unknown>) || {};
-        const cache = (tokens.cache as Record<string, number>) || {};
-        const provider = String(info.providerID || "unknown");
-        const model = String(info.modelID || "unknown");
-        const inputTokens = Number(tokens.input) || 0;
-        const outputTokens = Number(tokens.output) || 0;
-        const cacheReadTokens = Number(cache.read) || 0;
-        const cacheCreationTokens = Number(cache.write) || 0;
-        const cost = Number(info.cost) || 0;
-        const durationMs = time.completed - time.created;
-
-        const result = await sendLog(config, "api_request", {
-          "event.name": "api_request",
-          client: "opencode",
-          model,
-          provider,
-          input_tokens: inputTokens,
-          output_tokens: outputTokens,
-          cache_read_tokens: cacheReadTokens,
-          cache_creation_tokens: cacheCreationTokens,
-          cost_usd: cost,
-          duration_ms: durationMs,
-        });
-        await showError(client, result);
-
-        if (!cumulativeTokensByModel[model]) {
-          cumulativeTokensByModel[model] = {
-            input: 0,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-          };
-        }
-        cumulativeTokensByModel[model].input += inputTokens;
-        cumulativeTokensByModel[model].output += outputTokens;
-        cumulativeTokensByModel[model].cache_read += cacheReadTokens;
-        cumulativeTokensByModel[model].cache_write += cacheCreationTokens;
-
-        if (cost > 0) {
-          cumulativeCostByModel[model] =
-            (cumulativeCostByModel[model] || 0) + cost;
-        }
-
-        startMetricFlush();
       }
     }
 
-    if (event.type === "file.edited") {
-      const filePath = String(
-        event.properties?.filePath || event.properties?.path || "",
-      );
-      const language = filePath ? inferLanguage(filePath) : "unknown";
-
-      const diff = event.properties?.diff as
-        | Record<string, unknown>
-        | undefined;
-      if (diff) {
-        const added = Number(diff.added || diff.linesAdded || 0);
-        const removed = Number(diff.removed || diff.linesRemoved || 0);
-        if (added > 0) cumulativeLinesAdded += added;
-        if (removed > 0) cumulativeLinesRemoved += removed;
-      } else {
-        cumulativeLinesAdded += 1;
+    const time = (info.time as Record<string, number>) || {};
+    if (info.role === "assistant" && info.finish && time.completed) {
+      const messageId = String(info.id || "unknown");
+      if (sentMessages.has(messageId)) {
+        logVerbose(config, `Skipping duplicate message: ${messageId}`);
+        return;
       }
 
-      const toolName = "Edit";
-      const key = `${toolName}|${language}`;
-      cumulativeEditDecisions[key] = (cumulativeEditDecisions[key] || 0) + 1;
+      logVerbose(config, `Processing assistant message: ${messageId}`);
+      sentMessages.add(messageId);
+      const tokens = (info.tokens as Record<string, unknown>) || {};
+      const cache = (tokens.cache as Record<string, number>) || {};
+      const provider = String(info.providerID || "unknown").replace(/^kimchi$/, "ai-enabler");
+      const model = String(info.modelID || "unknown");
+      const inputTokens = Number(tokens.input) || 0;
+      const outputTokens = Number(tokens.output) || 0;
+      const cacheReadTokens = Number(cache.read) || 0;
+      const cacheCreationTokens = Number(cache.write) || 0;
+      const cost = Number(info.cost) || 0;
+      const durationMs = time.completed - time.created;
+
+      logVerbose(config, `Sending api_request log for message: model=${model} provider=${provider} inputTokens=${inputTokens} outputTokens=${outputTokens} cacheReadTokens=${cacheReadTokens} cacheCreationTokens=${cacheCreationTokens} cost=${cost} durationMs=${durationMs}`);
+
+      const result = await sendLog(config, "api_request", {
+        "event.name": "api_request",
+        client: "opencode",
+        model,
+        provider,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cache_read_tokens: cacheReadTokens,
+        cache_creation_tokens: cacheCreationTokens,
+        cost_usd: cost,
+        duration_ms: durationMs,
+      });
+      await showError(config, client, result);
+
+      if (!cumulativeTokensByModel[model]) {
+        cumulativeTokensByModel[model] = {
+          input: 0,
+          output: 0,
+          cache_read: 0,
+          cache_write: 0,
+        };
+      }
+      cumulativeTokensByModel[model].input += inputTokens;
+      cumulativeTokensByModel[model].output += outputTokens;
+      cumulativeTokensByModel[model].cache_read += cacheReadTokens;
+      cumulativeTokensByModel[model].cache_write += cacheCreationTokens;
+
+      if (cost > 0) {
+        cumulativeCostByModel[model] =
+          (cumulativeCostByModel[model] || 0) + cost;
+      }
 
       startMetricFlush();
     }
   }
+
+  if (event.type === "file.edited") {
+    const filePath = String(
+      event.properties?.filePath || event.properties?.path || "",
+    );
+    const language = filePath ? inferLanguage(filePath) : "unknown";
+
+    logVerbose(config, `File edited: filePath=${filePath} language=${language}`);
+
+    const diff = event.properties?.diff as
+      | Record<string, unknown>
+      | undefined;
+    if (diff) {
+      const added = Number(diff.added || diff.linesAdded || 0);
+      const removed = Number(diff.removed || diff.linesRemoved || 0);
+      if (added > 0) cumulativeLinesAdded += added;
+      if (removed > 0) cumulativeLinesRemoved += removed;
+    } else {
+      cumulativeLinesAdded += 1;
+    }
+
+    const toolName = "Edit";
+    const key = `${toolName}|${language}`;
+    cumulativeEditDecisions[key] = (cumulativeEditDecisions[key] || 0) + 1;
+
+    startMetricFlush();
+  }
+}
 
   async function handleToolAfter(
     input: { tool: string; args: Record<string, unknown> },

@@ -8,7 +8,7 @@ const MOCK_KIMCHI_CONFIG = {
     kimchi: {
       models: {
         "kimi-k2.5": { reasoning: false, cost: { input: 0.6, output: 3.0 }, limit: { context: 262000, output: 32000 }, modalities: { input: ["text", "image"], output: ["text"] } },
-        "minimax-m2.5": { reasoning: false, cost: { input: 0.3, output: 1.2 }, limit: { context: 196000, output: 32000 } },
+        "minimax-m2.7": { reasoning: false, cost: { input: 0.3, output: 1.2 }, limit: { context: 196000, output: 32000 } },
         "claude-sonnet-4-20250514": { reasoning: true, cost: { input: 3.0, output: 15.0 }, limit: { context: 200000, output: 64000 }, modalities: { input: ["text", "image"], output: ["text"] } },
         "gpt-4.1-nano": { reasoning: false, cost: { input: 0.1, output: 0.4 }, limit: { context: 1047576, output: 32768 }, modalities: { input: ["text", "image"], output: ["text"] } },
       },
@@ -99,8 +99,8 @@ async function test() {
 
   // --- Priority-based tier resolution (with multi-tier kimchi models) ---
   // reasoning: kimi-k2.5 (priority 60, only reasoning-tier model in test config)
-  // coding: claude-sonnet-4-20250514 (priority 12) > kimi-k2.5 (priority 25) > minimax-m2.5 (priority 40)
-  // quick: minimax-m2.5 (priority 10) > gpt-4.1-nano (priority 20) > kimi-k2.5 (priority 40)
+  // coding: claude-sonnet-4-20250514 (priority 12) > kimi-k2.5 (priority 25) > minimax-m2.7 (priority 40)
+  // quick: minimax-m2.7 (priority 10) > gpt-4.1-nano (priority 20) > kimi-k2.5 (priority 40)
 
   function makeOutput(sessionID: string, msgID: string, text: string) {
     return {
@@ -168,7 +168,7 @@ async function test() {
   assert(await routeAndGetModel("s-direct2", "m61", "Hello", "coding") === "claude-sonnet-4-20250514", "direct coding tier resolves to best available");
 
   _resetAll();
-  assert(await routeAndGetModel("s-direct3", "m62", "Hello", "quick") === "minimax-m2.5", "direct quick tier resolves to best available");
+  assert(await routeAndGetModel("s-direct3", "m62", "Hello", "quick") === "minimax-m2.7", "direct quick tier resolves to best available");
 
   // =========================================================================
   // AGENT-BASED ROUTING
@@ -176,20 +176,20 @@ async function test() {
 
   // Subagents skip classification and route directly to their tier
   _resetAll();
-  assert(await routeAndGetModel("s-agent1", "m70", "Find all files that import UserService", "auto", "explore") === "minimax-m2.5", "explore agent routes to quick tier");
+  assert(await routeAndGetModel("s-agent1", "m70", "Find all files that import UserService", "auto", "explore") === "minimax-m2.7", "explore agent routes to quick tier");
 
   _resetAll();
   assert(await routeAndGetModel("s-agent2", "m71", "Research best practices for auth", "auto", "general") === "claude-sonnet-4-20250514", "general agent routes to coding tier");
 
   // System agents always get quick tier
   _resetAll();
-  assert(await routeAndGetModel("s-agent3", "m72", "Generate a title", "auto", "title") === "minimax-m2.5", "title agent routes to quick tier");
+  assert(await routeAndGetModel("s-agent3", "m72", "Generate a title", "auto", "title") === "minimax-m2.7", "title agent routes to quick tier");
 
   _resetAll();
-  assert(await routeAndGetModel("s-agent4", "m73", "Compact this context", "auto", "compaction") === "minimax-m2.5", "compaction agent routes to quick tier");
+  assert(await routeAndGetModel("s-agent4", "m73", "Compact this context", "auto", "compaction") === "minimax-m2.7", "compaction agent routes to quick tier");
 
   _resetAll();
-  assert(await routeAndGetModel("s-agent5", "m74", "Summarize the session", "auto", "summary") === "minimax-m2.5", "summary agent routes to quick tier");
+  assert(await routeAndGetModel("s-agent5", "m74", "Summarize the session", "auto", "summary") === "minimax-m2.7", "summary agent routes to quick tier");
 
   // Primary agents fall through to heuristic classification (not short-circuited)
   _resetAll();
@@ -426,7 +426,7 @@ async function test() {
   );
   const upgradedModel = paramsCtx2.options?.model ?? "auto";
   // Should upgrade to gpt-4.1-nano (1M context, quick tier priority 20) or kimi-k2.5 (262K, quick tier priority 40)
-  assert(upgradedModel !== "minimax-m2.5", "context-aware: upgrades away from minimax when context is large");
+  assert(upgradedModel !== "minimax-m2.7", "context-aware: upgrades away from minimax when context is large");
   assert(upgradedModel === "gpt-4.1-nano" || upgradedModel === "kimi-k2.5", "context-aware: upgraded to a model with sufficient context window");
 
   // Context well within limits should NOT trigger upgrade
@@ -647,13 +647,13 @@ async function test() {
   // PRIORITY OVERRIDES
   // =========================================================================
 
-  // Create a fresh plugin instance with priority overrides: minimax-m2.5 gets quick priority 1
-  // (lower than kimi-k2.5's quick priority of 12), so minimax-m2.5 should win the quick tier.
+  // Create a fresh plugin instance with priority overrides: minimax-m2.7 gets quick priority 1
+  // (lower than kimi-k2.5's quick priority of 12), so minimax-m2.7 should win the quick tier.
   // But since primary agents floor quick→coding, we test via a subagent (e.g. "title") that
   // uses quick tier directly.
   _resetAll();
   const hooksWithPriorities = await pluginModule.server(mockCtx, {
-    priorities: { "minimax-m2.5": { quick: 1 } },
+    priorities: { "minimax-m2.7": { quick: 1 } },
   });
   await hooksWithPriorities["config"]!(structuredClone(MOCK_KIMCHI_CONFIG) as any);
 
@@ -675,11 +675,11 @@ async function test() {
     return paramsOutput.options?.model ?? "auto";
   }
 
-  // minimax-m2.5 has quick priority 1 (override) vs kimi-k2.5 quick priority 12 (MODEL_PLACEMENTS)
-  // so quick tier should resolve to minimax-m2.5
+  // minimax-m2.7 has quick priority 1 (override) vs kimi-k2.5 quick priority 12 (MODEL_PLACEMENTS)
+  // so quick tier should resolve to minimax-m2.7
   assert(
-    await routeWithPrioritiesHooks("s-prio1", "mp1", "Generate a title", "title") === "minimax-m2.5",
-    "priority override: minimax-m2.5 at quick priority 1 wins over kimi-k2.5 at priority 12",
+    await routeWithPrioritiesHooks("s-prio1", "mp1", "Generate a title", "title") === "minimax-m2.7",
+    "priority override: minimax-m2.7 at quick priority 1 wins over kimi-k2.5 at priority 12",
   );
 
   console.log(`\nPlugin tests: ${passed} passed, ${failed} failed out of ${passed + failed}`);
