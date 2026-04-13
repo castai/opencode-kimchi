@@ -117,8 +117,8 @@ const MODEL_PLACEMENTS: Record<string, TierPlacement[]> = {
   "gemini-2.5-flash":               [{ tier: "coding", priority: 30 }],
   "gemini-2.5-flash-preview-04-17": [{ tier: "coding", priority: 30 }],
 
-  // ── Minimax M2.5: 80.2% SWE, $0.30/$1.20 — coding and quick tiers
-  "minimax-m2.5": [
+  // ── Minimax M2.: 80.2% SWE, $0.30/$1.20 — coding and quick tiers
+  "minimax-m2.7": [
     { tier: "coding", priority: 40 },
     { tier: "quick",  priority: 10 },
   ],
