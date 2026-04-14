@@ -33,17 +33,49 @@ That's it. The plugin auto-configures itself — no manual provider setup needed
 The plugin registers as a Kimchi provider and exposes virtual models:
 
 - **`kimchi/auto`** — Default. Routes each message to the best model automatically.
-- **`kimchi/reasoning`** — Always use the reasoning model.
-- **`kimchi/coding`** — Always use the coding model.
-- **`kimchi/quick`** — Always use the quick/cheap model.
+- **`kimchi/reasoning`** — Lock to the reasoning model for the session.
+- **`kimchi/coding`** — Lock to the coding model for the session.
+- **`kimchi/quick`** — Lock to the quick/cheap model for the session.
 
-When using `kimchi/auto`, classification uses a cascade approach:
+You can also select any specific Kimchi model directly (e.g., `kimchi/kimi-k2.5`) to lock that model for the session. Use `/auto` in chat to return to automatic routing.
+
+### Auto-routing in practice
+
+When you use `kimchi/auto`, the plugin classifies **every message** independently and picks the best tier for it. Here's what that looks like in a real session:
+
+- You ask "Plan the architecture for auth" → **reasoning tier** (kimi-k2.5)
+- You say "Now implement the auth module" → **coding tier** (claude-sonnet-4)
+- You ask "What does this function do?" → **coding tier** (quick tier floored to coding for primary agents)
+- You say "Debug the TypeError in the handler" → **reasoning tier** (kimi-k2.5)
+- You say "Fix it" → **coding tier** (claude-sonnet-4)
+
+**What you should expect:**
+
+- Most coding sessions will spend the majority of time on the **coding tier**. This is by design — implementation, refactoring, and follow-up prompts are all classified as coding tasks.
+- The model switches to **reasoning** when the prompt clearly involves planning, debugging, architecture, or code review.
+- The **quick tier is reserved for subagents** (explore, general). Your primary chat agent is floored to the coding tier minimum, so you won't see the quick model used for your direct messages.
+- There is intentional **stickiness** within a tier — if the classifier is unsure and you're already in a tier, it stays put rather than flip-flopping. A clear cross-tier signal (e.g., switching from implementation to debugging) will still trigger a change.
+- The TUI model display stays on "auto" throughout. The actual model used for each message is shown in the routing toast.
+
+### Overriding auto-routing
+
+| Method | Effect | Duration |
+|--------|--------|----------|
+| Select `kimchi/reasoning` (or coding/quick) in TUI | Locks to that tier's best model | Until you switch or `/auto` |
+| Select a specific model (e.g., `kimchi/kimi-k2.5`) | Locks to that exact model | Until you switch or `/auto` |
+| `/plan`, `/debug`, `/review`, `/code`, `/refactor` | One-shot override for the next message | Single message |
+| `/lock debug` | Locks to a profile until cleared | Until `/auto` |
+| `/auto` | Clears all locks, returns to auto-routing | Immediate |
+
+### Classification cascade
+
+The auto-router uses a multi-stage approach to classify each message:
 
 1. **Heuristic classifier** (instant, free) — keyword signals and structural cues handle ~70% of messages with high confidence
-2. **LLM classifier** (fast, cheap) — when heuristics are ambiguous, the cheapest Kimchi model (minimax-m2.5) classifies the message in ~100 tokens
-3. **Conversation phase detection** — tool usage patterns, message lengths, and structural signals refine routing as the conversation progresses
+2. **LLM classifier** (fast, cheap) — when heuristics are ambiguous, the cheapest Kimchi model classifies the message in ~100 tokens
+3. **Conversation phase detection** — after 3+ messages, tool usage patterns, message lengths, and structural signals refine routing
 4. **Live tool tracking** — file edits, reads, and error patterns in tool output feed routing decisions in real-time
-5. **Mode stickiness** — once in a mode, stays there unless a high-confidence signal says otherwise
+5. **Mode stickiness** — within the same tier, stays put when confidence is low to avoid noisy flip-flopping
 6. **LLM self-routing** — the model itself can suggest switching tiers for the next message
 
 ## Agent profiles
@@ -71,6 +103,10 @@ When running as `kimchi/auto`, the agent operates as an **orchestrator** — it 
 - Direct tool use is reserved for trivial single-file changes (< 20 lines)
 
 The plugin tracks direct vs. delegated tool calls and injects a reminder when the agent starts doing too much work itself instead of delegating.
+
+## Context-aware model upgrades
+
+When the conversation context exceeds 85% of the current model's context window, the plugin automatically upgrades to a larger model in the same tier. For example, if you're on `minimax-m2.7` (196K context) and the conversation grows past 166K tokens, it switches to `gpt-4.1-nano` (1M context) or `kimi-k2.5` (262K context) — whichever is available in the same tier.
 
 ## Proactive context compaction
 

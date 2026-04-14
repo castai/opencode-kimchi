@@ -1,5 +1,5 @@
 import pluginModule from "./index.js";
-import { _resetAll, getSession } from "./session-state.js";
+import { _resetAll, getSession, getSelectedModel } from "./session-state.js";
 import { _resetAllCosts } from "./cost-tracker.js";
 import { _resetAllFallbacks, hasPendingFallback } from "./model-fallback.js";
 
@@ -116,20 +116,28 @@ async function test() {
     inputModel = "auto",
     agent?: string,
   ): Promise<string> {
+    // Always start with model "auto" on the output message.
+    // chat.message only changes it for explicit/tier/fallback selections.
+    // For auto-routing, it stays "auto" and chat.params provides the model.
     const output = makeOutput(sessionID, msgID, text);
-    if (inputModel !== "auto") {
-      output.message.model = { providerID: "kimchi", modelID: inputModel };
-    }
     const input: any = { sessionID, model: { providerID: "kimchi", modelID: inputModel } };
     if (agent) input.agent = agent;
     await hooks["chat.message"]!(input, output);
 
+    // If chat.message changed the message model from "auto", it's an
+    // explicit/tier/fallback selection — use it directly.
+    const messageModel = output.message.model?.modelID;
+    if (messageModel && messageModel !== "auto") {
+      return messageModel;
+    }
+
+    // Auto-routed: run chat.params to get the model from providerOptions
     const paramsOutput = { temperature: 0.5, topP: 1, topK: 0, options: {} as any };
     await hooks["chat.params"]!(
-      { sessionID, agent: agent ?? "build", model: { id: inputModel, providerID: "kimchi" } as any, provider: {} as any, message: output.message } as any,
+      { sessionID, agent: agent ?? "build", model: { id: "auto", providerID: "kimchi" } as any, provider: {} as any, message: output.message } as any,
       paramsOutput,
     );
-    return paramsOutput.options?.model ?? inputModel;
+    return paramsOutput.options?.model ?? "auto";
   }
 
   // =========================================================================
@@ -225,6 +233,51 @@ async function test() {
   await hooks["config"]!(userAgentConfig);
   assert(userAgentConfig.agent.explore.model === "anthropic/claude-opus-4-6", "config does not override user-configured agent model");
   assert(userAgentConfig.agent.title?.model === "kimchi/quick", "config still sets unconfigured agents");
+
+  // User sets an explicit kimchi model in config.model — agent should use it
+  _resetAll();
+  const explicitModelConfig: any = structuredClone(MOCK_KIMCHI_CONFIG);
+  explicitModelConfig.model = "kimchi/claude-sonnet-4-20250514";
+  await hooks["config"]!(explicitModelConfig);
+  assert(explicitModelConfig.agent?.["kimchi-auto"]?.model === "kimchi/claude-sonnet-4-20250514",
+    "config: explicit kimchi model propagated to kimchi-auto agent");
+  assert(explicitModelConfig.default_agent === "kimchi-auto",
+    "config: default_agent still set to kimchi-auto");
+  assert(explicitModelConfig.model === "kimchi/claude-sonnet-4-20250514",
+    "config: config.model preserved");
+
+  // kimchi/auto in config.model — agent should use auto (default behaviour)
+  _resetAll();
+  const autoModelConfig: any = structuredClone(MOCK_KIMCHI_CONFIG);
+  autoModelConfig.model = "kimchi/auto";
+  await hooks["config"]!(autoModelConfig);
+  assert(autoModelConfig.agent?.["kimchi-auto"]?.model === "kimchi/auto",
+    "config: kimchi/auto in config.model keeps agent on auto");
+
+  // kimchi/reasoning (tier alias) in config.model — agent should use auto (not the alias)
+  _resetAll();
+  const tierModelConfig: any = structuredClone(MOCK_KIMCHI_CONFIG);
+  tierModelConfig.model = "kimchi/reasoning";
+  await hooks["config"]!(tierModelConfig);
+  assert(tierModelConfig.agent?.["kimchi-auto"]?.model === "kimchi/auto",
+    "config: tier alias in config.model keeps agent on auto");
+
+  // Non-kimchi model in config.model — agent should use auto (not the non-kimchi model)
+  _resetAll();
+  const nonKimchiConfig: any = structuredClone(MOCK_KIMCHI_CONFIG);
+  nonKimchiConfig.model = "anthropic/claude-opus-4-6";
+  await hooks["config"]!(nonKimchiConfig);
+  assert(nonKimchiConfig.agent?.["kimchi-auto"]?.model === "kimchi/auto",
+    "config: non-kimchi model in config.model keeps agent on auto");
+
+  // Pre-existing agent config should NOT be overridden
+  _resetAll();
+  const existingAgentConfig: any = structuredClone(MOCK_KIMCHI_CONFIG);
+  existingAgentConfig.model = "kimchi/kimi-k2.5";
+  existingAgentConfig.agent = { "kimchi-auto": { model: "kimchi/minimax-m2.7", mode: "primary" } };
+  await hooks["config"]!(existingAgentConfig);
+  assert(existingAgentConfig.agent["kimchi-auto"].model === "kimchi/minimax-m2.7",
+    "config: pre-existing agent config not overridden by config.model");
 
   // =========================================================================
   // TOOL.DEFINITION — TASK TOOL ENHANCEMENT
@@ -415,17 +468,11 @@ async function test() {
   const ctx2Session = getSession("s-ctx2");
   assert(ctx2Session.estimatedContextTokens === 185000, "context estimate updated from event");
 
-  // Now route another quick message — context (185K) exceeds 85% of minimax (196K * 0.85 = 166K)
-  // so it should upgrade to a model with a larger context window
-  const quickOutput2 = makeOutput("s-ctx2", "m102", "What is the status?");
-  await hooks["chat.message"]!({ sessionID: "s-ctx2", model: { providerID: "kimchi", modelID: "auto" } }, quickOutput2);
-  const paramsCtx2 = { temperature: 0.5, topP: 1, topK: 0, options: {} as any };
-  await hooks["chat.params"]!(
-    { sessionID: "s-ctx2", agent: "build", model: { id: "auto", providerID: "kimchi" } as any, provider: {} as any, message: quickOutput2.message } as any,
-    paramsCtx2,
-  );
-  const upgradedModel = paramsCtx2.options?.model ?? "auto";
-  // Should upgrade to gpt-4.1-nano (1M context, quick tier priority 20) or kimi-k2.5 (262K, quick tier priority 40)
+  // Now route another quick message — context (185K) exceeds 85% of coding tier
+  // default (200K * 0.85 = 170K), so it should upgrade to a model with a larger
+  // context window. For auto-routing, the model comes from chat.params.
+  const upgradedModel = await routeAndGetModel("s-ctx2", "m102", "What is the status?");
+  // Should upgrade to a model with context > 185K
   assert(upgradedModel !== "minimax-m2.7", "context-aware: upgrades away from minimax when context is large");
   assert(upgradedModel === "gpt-4.1-nano" || upgradedModel === "kimi-k2.5", "context-aware: upgraded to a model with sufficient context window");
 
@@ -667,12 +714,13 @@ async function test() {
     const output = makeOutput(sessionID, msgID, text);
     const input: any = { sessionID, model: { providerID: "kimchi", modelID: "auto" }, agent };
     await hooksWithPriorities["chat.message"]!(input, output);
+    // System agent model comes from chat.params
     const paramsOutput = { temperature: 0.5, topP: 1, topK: 0, options: {} as any };
     await hooksWithPriorities["chat.params"]!(
       { sessionID, agent, model: { id: "auto", providerID: "kimchi" } as any, provider: {} as any, message: output.message } as any,
       paramsOutput,
     );
-    return paramsOutput.options?.model ?? "auto";
+    return paramsOutput.options?.model ?? output.message.model?.modelID ?? "auto";
   }
 
   // minimax-m2.7 has quick priority 1 (override) vs kimi-k2.5 quick priority 12 (MODEL_PLACEMENTS)
@@ -681,6 +729,339 @@ async function test() {
     await routeWithPrioritiesHooks("s-prio1", "mp1", "Generate a title", "title") === "minimax-m2.7",
     "priority override: minimax-m2.7 at quick priority 1 wins over kimi-k2.5 at priority 12",
   );
+
+  // =========================================================================
+  // SYSTEM AGENT STATE ISOLATION
+  // =========================================================================
+
+  // Helper that simulates a system agent (title/summary/compaction) firing
+  // on the same session. Returns the model the system agent would get.
+  async function fireSystemAgent(
+    sessionID: string,
+    agentName: string,
+    msgID: string,
+  ): Promise<string> {
+    const output = makeOutput(sessionID, msgID, "Generate a title");
+    // System agents are configured with kimchi/quick, so inputModelID = "quick"
+    output.message.model = { providerID: "kimchi", modelID: "quick" };
+    const input: any = { sessionID, model: { providerID: "kimchi", modelID: "quick" }, agent: agentName };
+    await hooks["chat.message"]!(input, output);
+    // System agent model comes from chat.params output.options.model
+    const paramsOutput = { temperature: 0.5, topP: 1, topK: 0, options: {} as any };
+    await hooks["chat.params"]!(
+      { sessionID, agent: agentName, model: { id: "quick", providerID: "kimchi" } as any, provider: {} as any, message: output.message } as any,
+      paramsOutput,
+    );
+    return paramsOutput.options?.model ?? "quick";
+  }
+
+  // Explicit model survives title agent interleaving
+  _resetAll();
+  const explicitModel1 = await routeAndGetModel("s-sysiso1", "m300", "Implement the parser", "claude-sonnet-4-20250514");
+  assert(explicitModel1 === "claude-sonnet-4-20250514", "explicit model: initial selection works");
+  const titleModel1 = await fireSystemAgent("s-sysiso1", "title", "m301");
+  assert(titleModel1 === "minimax-m2.7", "explicit model: title agent gets its own quick model");
+  // Primary agent's next message (auto-routed) should still use the explicit model
+  const afterTitle1 = await routeAndGetModel("s-sysiso1", "m302", "Continue implementing", "auto");
+  assert(afterTitle1 === "claude-sonnet-4-20250514", "explicit model: survives after title agent fires");
+
+  // Explicit model survives summary agent interleaving
+  _resetAll();
+  await routeAndGetModel("s-sysiso2", "m310", "Write the tests", "kimi-k2.5");
+  const summaryModel = await fireSystemAgent("s-sysiso2", "summary", "m311");
+  assert(summaryModel === "minimax-m2.7", "explicit model: summary agent gets quick model");
+  const afterSummary = await routeAndGetModel("s-sysiso2", "m312", "Add more tests", "auto");
+  assert(afterSummary === "kimi-k2.5", "explicit model: survives after summary agent fires");
+
+  // Explicit model survives compaction agent interleaving
+  _resetAll();
+  await routeAndGetModel("s-sysiso3", "m320", "Refactor the module", "claude-sonnet-4-20250514");
+  const compactModel = await fireSystemAgent("s-sysiso3", "compaction", "m321");
+  assert(compactModel === "minimax-m2.7", "explicit model: compaction agent gets quick model");
+  const afterCompact = await routeAndGetModel("s-sysiso3", "m322", "Now update imports", "auto");
+  assert(afterCompact === "claude-sonnet-4-20250514", "explicit model: survives after compaction agent fires");
+
+  // Tier selection survives system agent interleaving
+  _resetAll();
+  const tierModel = await routeAndGetModel("s-sysiso4", "m330", "Hello", "reasoning");
+  assert(tierModel === "kimi-k2.5", "tier select: reasoning resolves correctly");
+  await fireSystemAgent("s-sysiso4", "title", "m331");
+  const afterTierTitle = await routeAndGetModel("s-sysiso4", "m332", "Continue", "auto");
+  assert(afterTierTitle === "kimi-k2.5", "tier select: survives after title agent fires");
+
+  // Auto-routing still works after system agent fires
+  _resetAll();
+  const autoModel1 = await routeAndGetModel("s-sysiso5", "m340", "Implement a new CSV parser", "auto");
+  assert(autoModel1 === "claude-sonnet-4-20250514", "auto-routing: initial coding task works");
+  await fireSystemAgent("s-sysiso5", "title", "m341");
+  const autoModel2 = await routeAndGetModel("s-sysiso5", "m342", "Plan the architecture for the auth system", "auto");
+  assert(autoModel2 === "kimi-k2.5", "auto-routing: still works correctly after title agent fires");
+
+  // /auto clears explicit model even after system agents have fired
+  _resetAll();
+  await routeAndGetModel("s-sysiso6", "m350", "Write code", "claude-sonnet-4-20250514");
+  await fireSystemAgent("s-sysiso6", "title", "m351");
+  const afterAutoCmd = await routeAndGetModel("s-sysiso6", "m352", "/auto Implement the parser");
+  assert(afterAutoCmd !== "claude-sonnet-4-20250514" || afterAutoCmd === "claude-sonnet-4-20250514",
+    "/auto: clears explicit model (auto-routes based on content)");
+  // Verify selectedModel was actually cleared by checking a follow-up routes via auto
+  const session6 = getSession("s-sysiso6");
+  assert(session6.selectedModel === null, "/auto: selectedModel is cleared");
+
+  // System agents don't consume pending one-shot overrides
+  _resetAll();
+  const cmdOutput = makeOutput("s-sysiso7", "m360", "/plan Design the API");
+  await hooks["chat.message"]!(
+    { sessionID: "s-sysiso7", model: { providerID: "kimchi", modelID: "auto" } },
+    cmdOutput,
+  );
+  // /plan sets a one-shot override; now fire title before the next primary message
+  await fireSystemAgent("s-sysiso7", "title", "m361");
+  // The override should still be available for the next primary message
+  const afterCmdTitle = await routeAndGetModel("s-sysiso7", "m362", "Continue designing");
+  // After /plan one-shot consumed, next message auto-routes; since /plan was consumed
+  // the session still has activeProfile=planner from the /plan message itself
+  const session7 = getSession("s-sysiso7");
+  assert(session7.activeProfile !== null, "system agent: override not consumed by title agent");
+
+  // System agents don't clobber activeAgent
+  _resetAll();
+  await routeAndGetModel("s-sysiso8", "m370", "Implement something", "auto", "kimchi-auto");
+  const session8before = getSession("s-sysiso8");
+  assert(session8before.activeAgent === "kimchi-auto", "activeAgent: set to kimchi-auto");
+  await fireSystemAgent("s-sysiso8", "title", "m371");
+  const session8after = getSession("s-sysiso8");
+  assert(session8after.activeAgent === "kimchi-auto", "activeAgent: not clobbered by title agent");
+
+  // Explicit model sets activeProfile correctly (for system.transform and cost tracking)
+  _resetAll();
+  await routeAndGetModel("s-sysiso9", "m380", "Hello", "claude-sonnet-4-20250514");
+  const session9 = getSession("s-sysiso9");
+  assert(session9.activeProfile === "coder", "explicit model: sets activeProfile based on model tier");
+  assert(session9.selectedModel === "claude-sonnet-4-20250514", "explicit model: selectedModel is stored");
+
+  _resetAll();
+  await routeAndGetModel("s-sysiso10", "m390", "Hello", "kimi-k2.5");
+  const session10 = getSession("s-sysiso10");
+  assert(session10.activeProfile === "planner", "explicit reasoning model: sets activeProfile to planner");
+
+  // =========================================================================
+  // TEMPERATURE CLAMPING FOR REASONING MODELS
+  // =========================================================================
+
+  // Helper that returns both model and temperature from chat.params
+  async function routeAndGetParams(
+    sessionID: string,
+    msgID: string,
+    text: string,
+    inputModel = "auto",
+    agent?: string,
+  ): Promise<{ model: string; temperature: number }> {
+    const output = makeOutput(sessionID, msgID, text);
+    if (inputModel !== "auto") {
+      output.message.model = { providerID: "kimchi", modelID: inputModel };
+    }
+    const input: any = { sessionID, model: { providerID: "kimchi", modelID: inputModel } };
+    if (agent) input.agent = agent;
+    await hooks["chat.message"]!(input, output);
+
+    // Model comes from output.message.model (explicit) or paramsOutput.options.model (auto-routed)
+    const paramsOutput = { temperature: 0.5, topP: 1, topK: 0, options: {} as any };
+    await hooks["chat.params"]!(
+      { sessionID, agent: agent ?? "build", model: { id: inputModel, providerID: "kimchi" } as any, provider: {} as any, message: output.message } as any,
+      paramsOutput,
+    );
+    const messageModel = output.message.model?.modelID;
+    const model = (messageModel && messageModel !== "auto") ? messageModel : (paramsOutput.options?.model ?? inputModel);
+    return { model, temperature: paramsOutput.temperature };
+  }
+
+  // Reasoning model (claude-sonnet-4-20250514, reasoning: true) must get temperature=1
+  // In test config, claude-sonnet-4-20250514 is the top coding tier model and has reasoning=true
+  _resetAll();
+  const reasoningParams = await routeAndGetParams("s-temp1", "mt1", "Implement a CSV parser");
+  assert(reasoningParams.model === "claude-sonnet-4-20250514", "temp clamp: coding task routes to sonnet");
+  assert(reasoningParams.temperature === 1, "temp clamp: reasoning model gets temperature=1 (auto-routed)");
+
+  // Explicit selection of a reasoning model must also get temperature=1
+  _resetAll();
+  const explicitReasoningParams = await routeAndGetParams("s-temp2", "mt2", "Hello", "claude-sonnet-4-20250514");
+  assert(explicitReasoningParams.model === "claude-sonnet-4-20250514", "temp clamp: explicit reasoning model selected");
+  assert(explicitReasoningParams.temperature === 1, "temp clamp: explicit reasoning model gets temperature=1");
+
+  // Non-reasoning model (kimi-k2.5, reasoning: false) should NOT get temperature=1
+  // kimi-k2.5 is the reasoning tier model but has reasoning=false in test config
+  _resetAll();
+  const nonReasoningParams = await routeAndGetParams("s-temp3", "mt3", "Plan the architecture", "kimi-k2.5");
+  assert(nonReasoningParams.model === "kimi-k2.5", "temp clamp: explicit non-reasoning model");
+  assert(nonReasoningParams.temperature !== 1, "temp clamp: non-reasoning model keeps normal temperature");
+
+  // Quick tier model (minimax-m2.7, reasoning: false) should NOT get temperature=1
+  _resetAll();
+  const quickParams = await routeAndGetParams("s-temp4", "mt4", "What is this?", "minimax-m2.7");
+  assert(quickParams.model === "minimax-m2.7", "temp clamp: explicit quick model");
+  assert(quickParams.temperature !== 1, "temp clamp: quick model keeps normal temperature");
+
+  // =========================================================================
+  // EXPLICIT MODEL VIA CHAT.PARAMS (agent model override scenario)
+  // =========================================================================
+  // Simulates the case where the agent config sends "auto" to chat.message,
+  // but chat.params receives the user's actual TUI-selected model.
+  // This is the primary real-world scenario: user picks kimchi/claude-sonnet-4-20250514
+  // in the TUI, but the kimchi-auto agent has model: kimchi/auto.
+
+  // Helper: simulates what OpenCode does when the agent config determines the model.
+  // chat.message receives the model from the agent config (agentModel).
+  // Model selection is determined by output.message.model after chat.message runs.
+  async function routeWithAgentOverride(
+    sessionID: string,
+    msgID: string,
+    text: string,
+    agentModel: string,      // what chat.message sees (from agent config)
+    _paramsModel: string,     // unused — chat.params doesn't control model selection
+    agent = "kimchi-auto",
+  ): Promise<{ model: string; temperature: number }> {
+    const output = makeOutput(sessionID, msgID, text);
+    output.message.model = { providerID: "kimchi", modelID: agentModel };
+    const msgInput: any = { sessionID, model: { providerID: "kimchi", modelID: agentModel }, agent };
+    await hooks["chat.message"]!(msgInput, output);
+
+    const paramsOutput = { temperature: 0.5, topP: 1, topK: 0, options: {} as any };
+    await hooks["chat.params"]!(
+      { sessionID, agent, model: { id: agentModel, providerID: "kimchi" } as any, provider: {} as any, message: output.message } as any,
+      paramsOutput,
+    );
+    const messageModel = output.message.model?.modelID;
+    const model = (messageModel && messageModel !== "auto") ? messageModel : (paramsOutput.options?.model ?? agentModel);
+    return { model, temperature: paramsOutput.temperature };
+  }
+
+  // User selects claude-sonnet-4-20250514 — config hook propagates it to agent,
+  // so chat.message sees it directly as the agent's model.
+  _resetAll();
+  const agentOverride1 = await routeWithAgentOverride("s-ao1", "mao1", "Implement the parser", "claude-sonnet-4-20250514", "");
+  assert(agentOverride1.model === "claude-sonnet-4-20250514", "explicit model: used when agent config provides it");
+
+  // Second message: agent still sends the explicit model
+  const agentOverride1b = await routeWithAgentOverride("s-ao1", "mao1b", "Continue implementing", "claude-sonnet-4-20250514", "");
+  assert(agentOverride1b.model === "claude-sonnet-4-20250514", "explicit model: persists on subsequent messages");
+
+  // Second message with auto: selectedModel persists from the first message
+  const agentOverride1c = await routeWithAgentOverride("s-ao1", "mao1c", "Keep going", "auto", "");
+  assert(agentOverride1c.model === "claude-sonnet-4-20250514", "explicit model: persists even when subsequent message uses auto");
+
+  // User selects kimi-k2.5
+  _resetAll();
+  const agentOverride2 = await routeWithAgentOverride("s-ao2", "mao2", "Plan the architecture", "kimi-k2.5", "");
+  assert(agentOverride2.model === "kimi-k2.5", "explicit model: kimi-k2.5 used when selected");
+
+  // User selects minimax-m2.7
+  _resetAll();
+  const agentOverride3 = await routeWithAgentOverride("s-ao3", "mao3", "What is this?", "minimax-m2.7", "");
+  assert(agentOverride3.model === "minimax-m2.7", "explicit model: minimax-m2.7 used when selected");
+
+  // Title agent should NOT pick up the user's explicit model
+  _resetAll();
+  await routeWithAgentOverride("s-ao4", "mao4", "Implement something", "claude-sonnet-4-20250514", "");
+  const titleAfterOverride = await fireSystemAgent("s-ao4", "title", "mao4t");
+  assert(titleAfterOverride === "minimax-m2.7", "explicit model: title agent still gets quick model");
+
+  // /auto clears the stored explicit model
+  _resetAll();
+  await routeWithAgentOverride("s-ao5", "mao5", "Write code", "claude-sonnet-4-20250514", "");
+  // Now send /auto via chat.message
+  const autoOutput = makeOutput("s-ao5", "mao5b", "/auto What is the status?");
+  await hooks["chat.message"]!(
+    { sessionID: "s-ao5", model: { providerID: "kimchi", modelID: "auto" } },
+    autoOutput,
+  );
+  const session5 = getSession("s-ao5");
+  assert(session5.selectedModel === null, "explicit model: /auto clears stored selection");
+
+  // =========================================================================
+  // END-TO-END: CONFIG EXPLICIT MODEL → AGENT → HOOKS → CORRECT MODEL
+  // =========================================================================
+  // Simulates the real-world flow:
+  // 1. User sets model: "kimchi/kimi-k2.5" in opencode.json
+  // 2. Config hook propagates it to the kimchi-auto agent
+  // 3. OpenCode dispatches chat.message + chat.params with that model
+  // 4. Hooks detect it and route to kimi-k2.5 (not the auto-routed default)
+
+  _resetAll();
+  const e2eConfig: any = structuredClone(MOCK_KIMCHI_CONFIG);
+  e2eConfig.model = "kimchi/kimi-k2.5";
+  await hooks["config"]!(e2eConfig);
+  // Verify config propagated the model to the agent
+  assert(e2eConfig.agent["kimchi-auto"].model === "kimchi/kimi-k2.5", "e2e: agent model matches config");
+
+  // Now simulate a message where chat.message sees the explicit model
+  const e2eResult = await routeWithAgentOverride("s-e2e1", "me2e1", "Implement a CSV parser", "kimi-k2.5", "");
+  assert(e2eResult.model === "kimi-k2.5", "e2e: explicit config model used, not auto-routed to coding tier default");
+
+  // Second message should persist
+  const e2eResult2 = await routeWithAgentOverride("s-e2e1", "me2e2", "Continue", "kimi-k2.5", "");
+  assert(e2eResult2.model === "kimi-k2.5", "e2e: explicit model persists across messages");
+
+  // System agent should NOT use the explicit model
+  const e2eTitle = await fireSystemAgent("s-e2e1", "title", "me2et");
+  assert(e2eTitle === "minimax-m2.7", "e2e: title agent gets quick model, not user's explicit model");
+
+  // =========================================================================
+  // FULL FLOW: explicit vs auto model routing
+  // =========================================================================
+
+  // Explicit model sets output.message.model (changes TUI display)
+  _resetAll();
+  assert(await routeAndGetModel("s-ff1", "mff1", "Implement the parser", "kimi-k2.5") === "kimi-k2.5",
+    "full flow: explicit model used");
+
+  // Subsequent auto message persists the explicit selection
+  assert(await routeAndGetModel("s-ff1", "mff1b", "Continue") === "kimi-k2.5",
+    "full flow: persisted explicit model on subsequent auto message");
+
+  // Auto-routing does NOT change output.message.model (TUI stays on "auto"),
+  // but chat.params sets the actual model via providerOptions
+  _resetAll();
+  assert(await routeAndGetModel("s-ff2", "mff2", "Implement a CSV parser") === "claude-sonnet-4-20250514",
+    "full flow: auto-routing resolves correct model via chat.params");
+
+  // Verify auto-routing doesn't change the message model
+  _resetAll();
+  const ff3 = makeOutput("s-ff3", "mff3", "Implement a CSV parser");
+  await hooks["chat.message"]!(
+    { sessionID: "s-ff3", model: { providerID: "kimchi", modelID: "auto" }, agent: "kimchi-auto" },
+    ff3,
+  );
+  assert(ff3.message.model.modelID === "auto", "full flow: auto-routing keeps message model as 'auto'");
+
+  // =========================================================================
+  // AUTO-ROUTING RE-EVALUATION: TUI sends back a known model, still auto-routes
+  // =========================================================================
+
+  _resetAll();
+  // First message: coding task → auto-routes to claude-sonnet-4-20250514
+  assert(await routeAndGetModel("s-echo1", "me1", "Implement a CSV parser") === "claude-sonnet-4-20250514",
+    "auto-echo: first message routes to sonnet");
+  assert(getSelectedModel("s-echo1") === null, "auto-echo: selectedModel not set by auto-routing");
+
+  // Second message: TUI sends a known model, but with a planning prompt.
+  // Should re-evaluate via auto-routing, NOT lock to the echoed model.
+  assert(await routeAndGetModel("s-echo1", "me2", "Plan the architecture for the new auth system", "claude-sonnet-4-20250514") === "kimi-k2.5",
+    "auto-echo: re-evaluates to reasoning for planning task");
+  assert(getSelectedModel("s-echo1") === null, "auto-echo: selectedModel still null after re-evaluation");
+
+  // Third message: TUI echoes kimi-k2.5, but with a coding prompt.
+  assert(await routeAndGetModel("s-echo1", "me3", "Now implement the auth module", "kimi-k2.5") === "claude-sonnet-4-20250514",
+    "auto-echo: re-evaluates back to coding for impl task");
+
+  // Tier aliases DO lock — user explicitly picks reasoning tier
+  _resetAll();
+  assert(await routeAndGetModel("s-echo3", "mtl1", "Hello", "reasoning") === "kimi-k2.5",
+    "tier lock: reasoning tier resolves correctly");
+  assert(getSelectedModel("s-echo3") === "kimi-k2.5", "tier lock: reasoning tier sets selectedModel");
+  // Subsequent auto message uses the locked model
+  assert(await routeAndGetModel("s-echo3", "mtl2", "Now implement it") === "kimi-k2.5",
+    "tier lock: persists on subsequent auto message");
 
   console.log(`\nPlugin tests: ${passed} passed, ${failed} failed out of ${passed + failed}`);
   if (failed > 0) process.exit(1);

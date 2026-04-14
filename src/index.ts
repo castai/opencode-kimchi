@@ -1,6 +1,6 @@
 import type { Plugin, PluginModule } from "@opencode-ai/plugin";
 import type { ProfileID } from "./profiles.js";
-import type { ModelTier } from "./model-registry.js";
+import type { ModelTier, KimchiModel } from "./model-registry.js";
 import { ModelRegistry } from "./model-registry.js";
 import { resolveProfiles, type AgentProfile } from "./profiles.js";
 import { classifyWithHeuristics } from "./heuristic-classifier.js";
@@ -17,6 +17,7 @@ import {
   setSelectedModel,
   getSelectedModel,
   clearSelectedModel,
+
   incrementLiveSignal,
   updateContextEstimate,
   resetContextEstimate,
@@ -33,6 +34,7 @@ import {
   getAgentRouting,
   shouldSkipClassification,
   isPrimaryAgent,
+  isSystemAgent,
   getTaskToolEnhancement,
   getDelegationGuidance,
 } from "./agent-router.js";
@@ -161,6 +163,16 @@ function log(verbose: boolean, message: string): void {
   }
 }
 
+/**
+ * Clamp temperature for models that support reasoning/thinking.
+ * Anthropic requires temperature=1 when extended thinking is enabled;
+ * setting any other value causes a 400 error.
+ */
+function safeTemperature(desired: number, model: KimchiModel | undefined): number {
+  if (model?.supportsReasoning) return 1;
+  return desired;
+}
+
 const PROFILE_LABELS: Record<string, string> = {
   planner: "Planning mode",
   coder: "Coding mode",
@@ -256,12 +268,20 @@ const plugin: Plugin = async (ctx, options) => {
 
         const existingModels = provider?.models ?? {};
         const firstExisting = Object.values(existingModels)[0] as any;
-        const api = firstExisting?.api;
+        const baseApi = firstExisting?.api;
+
+        // Each model needs its own api object with the correct api.id,
+        // because OpenCode uses api.id as the model parameter sent to the
+        // AI SDK (sdk.chatModel(model.api.id)). If all models share the
+        // same api.id, every model resolves to the same underlying LLM.
+        function apiFor(modelId: string) {
+          return baseApi ? { ...baseApi, id: modelId } : undefined;
+        }
 
         const defaultModel = registry.getForTier("coding");
-        if (defaultModel && api) {
+        if (defaultModel && baseApi) {
           result["auto"] = {
-            api,
+            api: apiFor("auto"),
             name: "Kimchi Auto (routed)",
             capabilities: {
               temperature: true,
@@ -294,7 +314,7 @@ const plugin: Plugin = async (ctx, options) => {
           if (!model) continue;
 
           result[tier] = {
-            api,
+            api: apiFor(model.id),
             name: `Kimchi ${tier.charAt(0).toUpperCase() + tier.slice(1)} (${model.id})`,
             capabilities: {
               temperature: true,
@@ -324,7 +344,7 @@ const plugin: Plugin = async (ctx, options) => {
         for (const model of registry.all()) {
           if (!result[model.id]) {
             result[model.id] = {
-              api,
+              api: apiFor(model.id),
               name: model.name,
               capabilities: {
                 temperature: true,
@@ -381,9 +401,28 @@ const plugin: Plugin = async (ctx, options) => {
         subagents: subagentNames,
       });
 
+      // Determine the model for the primary agent.
+      // If the user has explicitly configured a specific kimchi model in config.model
+      // (not auto, not a tier alias), honour it by passing it through to the agent.
+      // This ensures OpenCode dispatches messages with the user's chosen model,
+      // which the hooks can then detect and respect.
+      let primaryModel = autoModel;
+      if (config.model && typeof config.model === "string") {
+        const userModel = config.model;
+        const isKimchiModel = userModel.startsWith(`${providerID}/`);
+        if (isKimchiModel) {
+          const modelIdPart = userModel.slice(providerID.length + 1);
+          const isVirtual = modelIdPart === "auto" || modelIdPart === "reasoning" || modelIdPart === "coding" || modelIdPart === "quick";
+          if (!isVirtual) {
+            primaryModel = userModel;
+            log(verbose, `user configured explicit model: ${userModel}, using as primary agent model`);
+          }
+        }
+      }
+
       if (!config.agent[KIMCHI_AGENT_NAME]) {
         config.agent[KIMCHI_AGENT_NAME] = {
-          model: autoModel,
+          model: primaryModel,
           mode: "primary",
           prompt: dynamicPrompt,
           description: KIMCHI_AGENT_DESCRIPTION,
@@ -479,6 +518,23 @@ const plugin: Plugin = async (ctx, options) => {
         }
 
         const agentName = (input as any).agent as string | undefined;
+
+        // System agents (title, summary, compaction) must not mutate primary routing state.
+        // They resolve their own model from their tier and return immediately.
+        if (agentName && isSystemAgent(agentName)) {
+          const agentRouting = getAgentRouting(agentName);
+          if (agentRouting) {
+            const tier = agentRouting.tier;
+            const model = registry.getForTier(tier);
+            if (model) {
+              output.message.model = { providerID, modelID: model.id };
+            }
+            log(verbose, `-> system agent ${agentName}: ${model?.id ?? tier} (no state mutation)`);
+          }
+          return;
+        }
+
+        // Only set activeAgent for non-system agents (preserves primary agent identity)
         if (agentName) {
           setActiveAgent(sessionID, agentName);
         }
@@ -494,6 +550,7 @@ const plugin: Plugin = async (ctx, options) => {
           setActiveProfile(sessionID, profileId);
           if (model) {
             setSelectedModel(sessionID, model.id);
+            output.message.model = { providerID, modelID: model.id };
           }
           recordDecision(sessionID, { profile: profileId, source: `direct: ${tier}` });
           log(verbose, `-> ${profileId} (direct ${tier} selection)`);
@@ -503,7 +560,41 @@ const plugin: Plugin = async (ctx, options) => {
 
         const isAutoRouted = !inputModelID || inputModelID === "auto";
 
-        if (!isAutoRouted) {
+        // Check for a previous explicit user selection (set by tier-select or
+        // explicit model pick). If present, honour it regardless of what
+        // inputModelID says — the user's choice is authoritative.
+        // We set output.message.model here so the TUI keeps showing the
+        // user's chosen model.
+        const previousSelection = getSelectedModel(sessionID);
+        if (previousSelection) {
+          const prevModel = registry.get(previousSelection);
+          if (prevModel) {
+            const profileId = TIER_TO_PROFILE[prevModel.tier];
+            setActiveProfile(sessionID, profileId);
+            output.message.model = { providerID, modelID: previousSelection };
+            recordDecision(sessionID, { profile: profileId, source: `direct: ${previousSelection} (persisted)` });
+            log(verbose, `-> persisted explicit model: ${previousSelection} (skipping auto-routing)`);
+            showRouting(client, profileId, previousSelection, prevModel.tier, `direct: ${previousSelection}`, sessionID);
+            return;
+          }
+        }
+
+        // Auto-echo detection: when auto-routing resolves a model and sets it
+        // on the message, the TUI may display it and send it back on the next
+        // prompt. If the session has auto-routed (activeProfile set) but the
+        // user never explicitly selected a model (selectedModel null), any
+        // known model ID is just a TUI echo — fall through to auto-routing.
+        const currentSession = getSession(sessionID);
+        const hasAutoRouted = currentSession.activeProfile !== null && !previousSelection;
+        const strippedInput = inputModelID?.startsWith(`${providerID}/`)
+          ? inputModelID.slice(providerID.length + 1) : (inputModelID ?? "");
+        const isKnownModel = !isAutoRouted && registry.get(strippedInput) !== undefined;
+        const isAutoEcho = hasAutoRouted && isKnownModel;
+        if (isAutoEcho) {
+          log(verbose, `auto-echo: inputModelID=${inputModelID} is TUI echo, treating as auto-routing`);
+        }
+
+        if (!isAutoRouted && !isAutoEcho) {
           // Strip provider prefix if present (e.g., "kimchi/minimax-m2.7" -> "minimax-m2.7")
           const modelIdWithoutPrefix = inputModelID!.startsWith(`${providerID}/`)
             ? inputModelID!.slice(providerID.length + 1)
@@ -511,18 +602,28 @@ const plugin: Plugin = async (ctx, options) => {
           const knownModel = registry.get(modelIdWithoutPrefix);
           log(verbose, `explicit model selection: input=${inputModelID}, stripped=${modelIdWithoutPrefix}, found=${knownModel?.id ?? 'null'}`);
           if (knownModel) {
-            // Store the selected model and set output model
-            // DO NOT set activeProfile - this bypasses all routing logic
+            // Store the selected model and set the profile for the model's tier.
+            // output.message.model is the ONLY way to control which model OpenCode
+            // sends the request to. activeProfile provides context for system prompts,
+            // cost tracking, and compaction.
             setSelectedModel(sessionID, knownModel.id);
-            log(verbose, `stored selected model: ${knownModel.id} for session ${sessionID}`);
+            const profileId = TIER_TO_PROFILE[knownModel.tier];
+            setActiveProfile(sessionID, profileId);
+            log(verbose, `stored selected model: ${knownModel.id} (profile: ${profileId}) for session ${sessionID}`);
             output.message.model = { providerID, modelID: knownModel.id };
-            log(verbose, `-> direct model: ${knownModel.id} (bypassing all routing)`);
-            showRouting(client, "direct", knownModel.id, knownModel.tier, `direct: ${knownModel.id}`, sessionID);
+            log(verbose, `-> direct model: ${knownModel.id} (bypassing auto-routing)`);
+            recordDecision(sessionID, { profile: profileId, source: `direct: ${knownModel.id}` });
+            showRouting(client, profileId, knownModel.id, knownModel.tier, `direct: ${knownModel.id}`, sessionID);
           } else {
             log(verbose, `model not found in registry: ${modelIdWithoutPrefix}`);
           }
+          // CRITICAL: Return here to prevent any further processing
+          log(verbose, `explicit model selection: RETURNING NOW - no routing logic will run`);
           return;
         }
+        
+        // If we reach here, auto-routing is active - log this clearly
+        log(verbose, `AUTO-ROUTING ACTIVE: isAutoRouted=${isAutoRouted}, proceeding with classification`);
 
         // Agent routing for subagents (explore, general, title, summary, compaction)
         // This runs AFTER explicit model selection, so user-selected models take precedence
@@ -532,6 +633,8 @@ const plugin: Plugin = async (ctx, options) => {
           const model = registry.getForTier(tier);
           const profileId = TIER_TO_PROFILE[tier];
           setActiveProfile(sessionID, profileId);
+          // Don't set output.message.model — chat.params handles the actual
+          // model via providerOptions. This keeps the TUI display unchanged.
           recordDecision(sessionID, { profile: profileId, source: `agent: ${agentName} → ${tier}` });
           log(verbose, `-> ${profileId} (agent: ${agentName})`);
           showRouting(client, profileId, model?.id ?? tier, tier, `agent: ${agentName}`, sessionID);
@@ -624,24 +727,30 @@ const plugin: Plugin = async (ctx, options) => {
         recordDecision(sessionID, { profile: profile.id, source });
         log(verbose, `-> ${profile.label} | ${source}`);
         
-        // Check if there's a selected model that matches this profile's tier
-        // If so, use the selected model instead of the profile default
-        const selectedModel = getSelectedModel(sessionID);
-        log(verbose, `chat.message: selectedModel=${selectedModel}, profile.id=${profile.id}, profile.tier=${profile.tier}`);
-        let displayModel = profile.model;
-        if (selectedModel) {
-          const selectedModelEntry = registry.get(selectedModel);
-          log(verbose, `chat.message: selectedModelEntry=${selectedModelEntry?.id}, tier=${selectedModelEntry?.tier}`);
-          if (selectedModelEntry) {
-            const selectedModelProfile = TIER_TO_PROFILE[selectedModelEntry.tier];
-            log(verbose, `chat.message: selectedModelProfile=${selectedModelProfile}, profile.id=${profile.id}, match=${selectedModelProfile === profile.id}`);
-            if (selectedModelProfile === profile.id) {
-              displayModel = selectedModel;
-              log(verbose, `using selected model ${selectedModel} for profile ${profile.id}`);
+        // Resolve the model for display/logging. Don't set output.message.model —
+        // that would change the TUI from "auto" to the resolved model. Instead,
+        // chat.params will set output.options.model which overrides the model
+        // parameter in the API request via providerOptions.
+        let resolvedModel = registry.getForTier(profile.tier);
+
+        // Context-window upgrade: if usage exceeds 85% of the current model's
+        // context window, try to find a larger model in the same tier.
+        const session = getSession(sessionID);
+        if (resolvedModel && session.estimatedContextTokens > 0) {
+          const contextLimit = resolvedModel.contextWindow;
+          const usageRatio = session.estimatedContextTokens / contextLimit;
+          if (usageRatio > 0.85) {
+            const upgrade = registry.findModelForContext(profile.tier, session.estimatedContextTokens);
+            if (upgrade && upgrade.id !== resolvedModel.id) {
+              log(verbose, `context ${session.estimatedContextTokens} tokens exceeds 85% of ${resolvedModel.id} (${contextLimit}), upgrading to ${upgrade.id} (${upgrade.contextWindow})`);
+              resolvedModel = upgrade;
+              source = `context-upgrade: ${source} → ${upgrade.id}`;
             }
           }
         }
-        showRouting(client, profile.id, displayModel, profile.tier, source, sessionID);
+
+        log(verbose, `auto-routing resolved: ${resolvedModel?.id ?? "none"} (not setting output.message.model)`);
+        showRouting(client, profile.id, resolvedModel?.id ?? profile.model, profile.tier, source, sessionID);
 
 
       } catch (err) {
@@ -703,72 +812,87 @@ const plugin: Plugin = async (ctx, options) => {
     },
 
     "chat.params": async (input, output) => {
+      // chat.params sets temperature AND the actual model for auto-routed
+      // sessions. For auto-routing, chat.message deliberately does NOT set
+      // output.message.model (to keep the TUI on "auto"). Instead, this
+      // hook sets output.options.model which goes to providerOptions and
+      // overrides the model parameter in the API request body.
+      //
+      // For explicit model selections, chat.message DOES set output.message.model
+      // and we only need to set temperature here.
       try {
         const inputProviderID = getProviderID(input as any);
-        const inputModelID = getModelID(input as any);
-        log(verbose, `chat.params: inputProviderID=${inputProviderID}, inputModelID=${inputModelID}`);
+        log(verbose, `chat.params: inputProviderID=${inputProviderID}`);
         if (inputProviderID && inputProviderID !== providerID) {
-          log(verbose, `chat.params: provider mismatch, returning`);
+          return;
+        }
+
+        // System agents: set model and temperature from their tier
+        const paramsAgentName = (input as any).agent as string | undefined;
+        if (paramsAgentName && isSystemAgent(paramsAgentName)) {
+          const agentRouting = getAgentRouting(paramsAgentName);
+          if (agentRouting) {
+            const model = registry.getForTier(agentRouting.tier);
+            if (model) {
+              output.options = { ...output.options, model: model.id };
+              output.temperature = safeTemperature(0.5, model);
+              log(verbose, `chat.params: system agent ${paramsAgentName} -> model=${model.id}, temp=${output.temperature}`);
+            }
+          }
           return;
         }
 
         const sessionID = getSessionID(input as any);
-        log(verbose, `chat.params: sessionID=${sessionID}`);
+        if (!sessionID) return;
 
-        // FIRST: Check if user explicitly selected a specific model
-        // If so, use it directly and bypass ALL routing logic
-        if (sessionID) {
-          const selectedModel = getSelectedModel(sessionID);
-          if (selectedModel) {
-            log(verbose, `chat.params: using explicitly selected model=${selectedModel} (bypassing all routing)`);
-            output.options = { ...output.options, model: selectedModel };
-            // Use default temperature since we're bypassing profile
-            output.temperature = 0.6;
-            log(verbose, `chat.params: output.options set with selected model, returning`);
-            return;
-          }
+        const session = getSession(sessionID);
+        const selectedModel = getSelectedModel(sessionID);
+
+        // Explicit model selection: chat.message already set output.message.model.
+        // We only need temperature.
+        if (selectedModel) {
+          const modelEntry = registry.get(selectedModel);
+          const profileId = modelEntry ? TIER_TO_PROFILE[modelEntry.tier] : null;
+          const temp = profileId ? profiles[profileId].temperature : 0.6;
+          output.temperature = safeTemperature(temp, modelEntry);
+          log(verbose, `chat.params: explicit model=${selectedModel}, temp=${output.temperature}`);
+          return;
         }
 
-        // SECOND: Fall back to profile-based routing (for auto/tier selections)
-        if (sessionID) {
-          const session = getSession(sessionID);
-          log(verbose, `chat.params: session found, activeProfile=${session.activeProfile}`);
-          if (session.activeProfile) {
-            const activeProfile = profiles[session.activeProfile];
-            let resolvedModel = activeProfile.model;
-            log(verbose, `chat.params: resolvedModel=${resolvedModel}`);
+        // Auto-routed session: resolve the model from the active profile and
+        // set output.options.model to override the API request model parameter.
+        if (session.activeProfile) {
+          const activeProfile = profiles[session.activeProfile];
+          let resolvedModel = registry.getForTier(activeProfile.tier);
 
-            if (session.estimatedContextTokens > 0) {
-              const modelEntry = registry.get(resolvedModel);
-              const contextLimit = modelEntry?.contextWindow ?? 128_000;
-              const usageRatio = session.estimatedContextTokens / contextLimit;
-
-              if (usageRatio > 0.85) {
-                const upgrade = registry.findModelForContext(
-                  activeProfile.tier,
-                  session.estimatedContextTokens,
-                );
-                if (upgrade && upgrade.id !== resolvedModel) {
-                  log(verbose, `context ${session.estimatedContextTokens} tokens exceeds 85% of ${resolvedModel} (${contextLimit}), upgrading to ${upgrade.id} (${upgrade.contextWindow})`);
-                  resolvedModel = upgrade.id;
-                  showRouting(client, activeProfile.id, resolvedModel, activeProfile.tier, `context-upgrade: ${resolvedModel}`, sessionID);
-                }
+          // Context-window upgrade
+          if (resolvedModel && session.estimatedContextTokens > 0) {
+            const contextLimit = resolvedModel.contextWindow;
+            const usageRatio = session.estimatedContextTokens / contextLimit;
+            if (usageRatio > 0.85) {
+              const upgrade = registry.findModelForContext(activeProfile.tier, session.estimatedContextTokens);
+              if (upgrade && upgrade.id !== resolvedModel.id) {
+                log(verbose, `chat.params: context upgrade ${resolvedModel.id} -> ${upgrade.id}`);
+                resolvedModel = upgrade;
               }
             }
-
-            output.temperature = activeProfile.temperature;
-            log(verbose, `chat.params: setting output.options.model=${resolvedModel}`);
-            output.options = { ...output.options, model: resolvedModel };
-            log(verbose, `chat.params: output.options set, returning`);
-            return;
           }
+
+          if (resolvedModel) {
+            output.options = { ...output.options, model: resolvedModel.id };
+            output.temperature = safeTemperature(activeProfile.temperature, resolvedModel);
+            log(verbose, `chat.params: auto-routed model=${resolvedModel.id}, temp=${output.temperature}`);
+          }
+          return;
         }
 
-        const modelID = getModelID(input as any);
-        if (modelID) {
-          const fallback = Object.values(profiles).find((p) => p.model === modelID);
-          if (fallback) {
-            output.temperature = fallback.temperature;
+        // Fallback: try to match the model to a profile for temperature
+        const messageModelID = (input as any).message?.model?.modelID as string | undefined;
+        if (messageModelID) {
+          const modelEntry = registry.get(messageModelID);
+          if (modelEntry) {
+            const profileId = TIER_TO_PROFILE[modelEntry.tier];
+            output.temperature = safeTemperature(profiles[profileId].temperature, modelEntry);
           }
         }
       } catch (err) {
@@ -964,7 +1088,7 @@ export { detectPhase, extractSignals } from "./phase-detector.js";
 export { routingTools } from "./tools.js";
 export { buildTelemetryConfig, createTelemetry } from "./telemetry.js";
 export { classifyWithLlm } from "./llm-classifier.js";
-export { getAgentRouting, shouldSkipClassification } from "./agent-router.js";
+export { getAgentRouting, shouldSkipClassification, isSystemAgent } from "./agent-router.js";
 export { KIMCHI_AGENT_NAME } from "./kimchi-agent.js";
 export type { ProfileID, AgentProfile } from "./profiles.js";
 export type { ModelTier, KimchiModel } from "./model-registry.js";

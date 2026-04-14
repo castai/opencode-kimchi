@@ -149,6 +149,8 @@ export function clearSelectedModel(sessionID: string): void {
   }
 }
 
+
+
 export function updateSignals(sessionID: string, signals: ConversationSignals): void {
   const state = getSession(sessionID);
   state.signals = signals;
