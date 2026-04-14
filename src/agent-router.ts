@@ -38,27 +38,18 @@ export function shouldSkipClassification(agentName: string): boolean {
   return !routing.isPrimary;
 }
 
-const DELEGATION_GUIDANCE = [
-  "DELEGATION CONTRACT: You are an ORCHESTRATOR, not an executor.",
-  "MUST NOT: Write code directly, perform file operations, execute bash commands, conduct research.",
-  "MUST: Delegate to @explore for codebase search, @general for research, task() for implementation.",
-  "MAY ONLY execute directly if: < 10 lines AND single file, OR coordination/synthesis only, OR user explicitly requests.",
-  "STOP before every action and check: Can subagent do this? If YES, DELEGATE.",
-].join(" ");
+const DELEGATION_GUIDANCE =
+  "You are an ORCHESTRATOR. Default action: DELEGATE via task(description, subagent_type, prompt). " +
+  "All three params required. Direct tool use only for <10 line single-file edits or coordination.";
 
 export function getDelegationGuidance(): string {
   return DELEGATION_GUIDANCE;
 }
 
-const TASK_TOOL_ENHANCEMENT = [
-  "DELEGATE implementation work via task() — this is MANDATORY per Delegation Contract.",
-  "Each subagent gets its own context window and a cost-optimized model.",
-  "Use task() for: implementing features, writing tests, refactoring, fixing bugs.",
-  "Use @explore for: finding files, searching patterns, understanding codebase structure.",
-  "Use @general for: research, investigation, gathering context from multiple sources.",
-  "Write detailed prompts with: TASK, EXPECTED OUTCOME, MUST DO, MUST NOT DO, CONTEXT.",
-  "After task completes, VERIFY the result before reporting to user.",
-].join(" ");
+const TASK_TOOL_ENHANCEMENT =
+  "DELEGATE via task(). Required params: description (3-5 words), subagent_type (\"explore\" or \"general\"), prompt (instructions). " +
+  "Example: task(description=\"Fix auth bug\", subagent_type=\"general\", prompt=\"Fix the auth validation in src/auth.ts...\"). " +
+  "Use explore for search/find, general for implementation/research. Verify results after.";
 
 export function getTaskToolEnhancement(): string {
   return TASK_TOOL_ENHANCEMENT;

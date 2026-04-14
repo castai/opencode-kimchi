@@ -292,6 +292,49 @@ async function test() {
   await hooks["tool.definition"]!({ toolID: "read" }, otherToolOutput);
   assert(otherToolOutput.description === "Some other tool", "non-task tool description not modified");
 
+  // --- Complex tool detection (schema-based) ---
+  // Tool with >5 params → complex
+  const manyParamsTool = {
+    description: "A tool with many params",
+    parameters: { properties: { a: {}, b: {}, c: {}, d: {}, e: {}, f: {} } },
+  };
+  await hooks["tool.definition"]!({ toolID: "some_api_tool" }, manyParamsTool);
+  assert(manyParamsTool.description.includes("[IMPORTANT: This tool has a complex schema"),
+    "tool with >5 params flagged as complex");
+
+  // Tool with nested object → complex
+  const nestedTool = {
+    description: "A tool with nested objects",
+    parameters: { properties: { query: { type: "string" }, options: { type: "object", properties: { limit: { type: "number" } } } } },
+  };
+  await hooks["tool.definition"]!({ toolID: "nested_tool" }, nestedTool);
+  assert(nestedTool.description.includes("[IMPORTANT: This tool has a complex schema"),
+    "tool with nested object property flagged as complex");
+
+  // Tool with oneOf combinator → complex
+  const combinatorTool = {
+    description: "A tool with union types",
+    parameters: { properties: { value: { oneOf: [{ type: "string" }, { type: "number" }] } } },
+  };
+  await hooks["tool.definition"]!({ toolID: "union_tool" }, combinatorTool);
+  assert(combinatorTool.description.includes("[IMPORTANT: This tool has a complex schema"),
+    "tool with oneOf combinator flagged as complex");
+
+  // Simple tool → not flagged
+  const simpleTool = { description: "A simple tool", parameters: { properties: { path: { type: "string" } } } };
+  await hooks["tool.definition"]!({ toolID: "simple_tool" }, simpleTool);
+  assert(!simpleTool.description.includes("[IMPORTANT"),
+    "simple tool with 1 param not flagged as complex");
+
+  // task() itself → never flagged (it's the delegation mechanism)
+  const taskComplexCheck = {
+    description: "Task tool",
+    parameters: { properties: { a: {}, b: {}, c: {}, d: {}, e: {}, f: {}, g: {} } },
+  };
+  await hooks["tool.definition"]!({ toolID: "task" }, taskComplexCheck);
+  assert(!taskComplexCheck.description.includes("[IMPORTANT: This tool has a complex schema"),
+    "task() tool never flagged as complex even with many params");
+
   // =========================================================================
   // KIMCHI-AUTO AGENT — DELEGATION PROMPT IN AGENT CONFIG
   // =========================================================================
@@ -300,16 +343,19 @@ async function test() {
   const kimchiAgentConfig: any = structuredClone(MOCK_KIMCHI_CONFIG);
   await hooks["config"]!(kimchiAgentConfig);
   const agentPrompt = kimchiAgentConfig.agent?.["kimchi-auto"]?.prompt ?? "";
-  assert(agentPrompt.includes("Delegation"), "kimchi-auto agent has delegation section");
+  assert(agentPrompt.includes("Orchestrator"), "kimchi-auto agent has orchestrator role");
   assert(agentPrompt.includes("@explore"), "kimchi-auto prompt mentions @explore");
   assert(agentPrompt.includes("@general"), "kimchi-auto prompt mentions @general");
-  assert(agentPrompt.includes("<intent-gate>"), "kimchi-auto prompt has intent gate");
+  assert(agentPrompt.includes("<delegation>"), "kimchi-auto prompt has delegation section");
+  assert(agentPrompt.includes("<intent-gate>"), "kimchi-auto prompt has workflow section");
   assert(agentPrompt.includes("<codebase-first>"), "kimchi-auto prompt has codebase-first section");
   assert(agentPrompt.includes("<testing>"), "kimchi-auto prompt has testing section");
   assert(agentPrompt.includes("<verification>"), "kimchi-auto prompt has verification section");
-  assert(agentPrompt.includes("<guardrails>"), "kimchi-auto prompt has guardrails section");
+  assert(agentPrompt.includes("<guardrails>"), "kimchi-auto prompt has rules section");
   assert(agentPrompt.includes("model-routing"), "kimchi-auto prompt has dynamic model context");
   assert(agentPrompt.includes("kimi-k2.5"), "kimchi-auto prompt includes available model names");
+  assert(agentPrompt.includes("description"), "kimchi-auto prompt documents task() required params");
+  assert(agentPrompt.includes("subagent_type"), "kimchi-auto prompt documents subagent_type param");
 
   // =========================================================================
   // SLASH COMMAND OVERRIDES
@@ -358,9 +404,14 @@ async function test() {
     { sessionID: "s-sys", model: { id: "kimi-k2.5", providerID: "kimchi" } as any },
     systemOutput,
   );
-  assert(systemOutput.system.length === 3, "system transform adds profile prompt + delegation guidance");
-  assert(systemOutput.system[1].includes("debugging"), "debugger profile system prompt injected");
-  assert(systemOutput.system[2].includes("DELEGATION CONTRACT"), "delegation guidance injected alongside profile prompt");
+  // For kimi-k2.5: [OVERRIDE] is unshifted to front, so order is:
+  // [0] self-execution override (unshifted), [1] existing, [2] profile, [3] delegation, [4] tool rule
+  assert(systemOutput.system.length === 5, "system transform adds profile prompt + delegation guidance + model-specific prompts");
+  assert(systemOutput.system[0].includes("[OVERRIDE]"), "self-execution override is FIRST system message for kimi-k2.5");
+  assert(systemOutput.system[0].includes("kimi-k2.5"), "self-execution override names the model");
+  assert(systemOutput.system[2].includes("debugging"), "debugger profile system prompt injected");
+  assert(systemOutput.system[3].includes("ORCHESTRATOR"), "delegation guidance injected");
+  assert(systemOutput.system[4].includes("TOOL RULE"), "tool-call rule injected for kimi-k2.5");
 
   const reviewForSystem = makeOutput("s-sys", "m41", "/review Check my code");
   await hooks["chat.message"]!({ sessionID: "s-sys", model: { providerID: "kimchi", modelID: "auto" } }, reviewForSystem);
@@ -370,7 +421,7 @@ async function test() {
     { sessionID: "s-sys", model: { id: "kimi-k2.5", providerID: "kimchi" } as any },
     systemOutput2,
   );
-  assert(systemOutput2.system[1].includes("review"), "reviewer profile system prompt injected after /review");
+  assert(systemOutput2.system[2].includes("review"), "reviewer profile system prompt injected after /review (index 2 due to kimi override at 0)");
 
   // Delegation nudge: after 5+ direct tool calls with zero delegation
   _resetAll();
@@ -384,7 +435,7 @@ async function test() {
     { sessionID: "s-nudge", model: { id: "auto", providerID: "kimchi" } as any },
     nudgeSystemOutput,
   );
-  assert(nudgeSystemOutput.system.some((s: string) => s.includes("CRITICAL VIOLATION")), "strong delegation nudge injected after 5+ direct calls with zero delegation");
+  assert(nudgeSystemOutput.system.some((s: string) => s.includes("[STOP]")), "strong delegation nudge injected after 5+ direct calls with zero delegation");
 
   // No nudge if delegation has occurred
   _resetAll();
@@ -399,7 +450,7 @@ async function test() {
     { sessionID: "s-nonudge", model: { id: "auto", providerID: "kimchi" } as any },
     noNudgeSystemOutput,
   );
-  assert(!noNudgeSystemOutput.system.some((s: string) => s.includes("CRITICAL VIOLATION")), "no strong nudge when delegation has occurred");
+  assert(!noNudgeSystemOutput.system.some((s: string) => s.includes("[STOP]")), "no strong nudge when delegation has occurred");
 
   // =========================================================================
   // TOOL.EXECUTE.AFTER — LIVE SIGNAL TRACKING

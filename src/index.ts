@@ -42,6 +42,11 @@ import {
   KIMCHI_AGENT_NAME,
   KIMCHI_AGENT_DESCRIPTION,
   buildKimchiAutoPrompt,
+  isSelfExecutingModel,
+  isWeakToolCallModel,
+  hasWeakToolCallModels,
+  isComplexTool,
+  getComplexToolWarning,
 } from "./kimchi-agent.js";
 import { routingTools } from "./tools.js";
 import { buildTelemetryConfig, createTelemetry, TelemetryPluginOption } from "./telemetry.js";
@@ -71,15 +76,13 @@ const READ_TOOLS = new Set(["read", "glob", "grep", "search", "find", "file_read
 const DIRECT_WORK_TOOLS = new Set([...EDIT_TOOLS, ...READ_TOOLS]);
 const DELEGATION_TOOLS = new Set(["task", "call_omo_agent"]);
 
-const DELEGATION_REMINDER = `[Delegation Reminder] You are using tools directly instead of delegating to subagents.
+/** Populated by tool.definition hook — tracks tools whose schemas were flagged as complex. */
+const complexToolIDs = new Set<string>();
 
-As an orchestrator, you should:
-- Delegate codebase search to @explore: task(subagent_type="explore", load_skills=[], run_in_background=true, prompt="...")
-- Delegate implementation to subagents: task(category="quick", load_skills=[], run_in_background=false, prompt="1. TASK: ... 2. EXPECTED OUTCOME: ... 3. MUST DO: ... 4. CONTEXT: ...")
-- Only use tools directly for trivial changes (< 20 lines, single file)
-
-If you're reading files to understand the codebase → delegate to @explore.
-If you're editing multiple files → delegate via task().`;
+const DELEGATION_REMINDER =
+  `[DELEGATE] You are calling tools directly. As orchestrator, delegate instead:\n` +
+  `task(description="<3-5 words>", subagent_type="explore"|"general", prompt="<what to do>")\n` +
+  `Direct tool use is only for <10 line single-file edits.`;
 const ERROR_PATTERN = /\b(?:error|exception|failed|traceback)\b(?![\s-]*(?:handling|handler|boundary|boundaries|recovery|message|code|type|class))/i;
 
 const TIER_TO_PROFILE: Record<ModelTier, ProfileID> = {
@@ -776,23 +779,49 @@ const plugin: Plugin = async (ctx, options) => {
             if (isPrimary) {
               output.system.push(getDelegationGuidance());
 
+              // Resolve the actual model that will serve this turn
+              const resolvedModel = registry.getForTier(profiles[session.activeProfile].tier);
+              const activeModelId = resolvedModel?.id ?? "";
+              const isSelfExec = isSelfExecutingModel(activeModelId);
+              const isWeakTool = isWeakToolCallModel(activeModelId);
+
+              // Model-specific: tighter thresholds for self-executing models
+              const criticalThreshold = isSelfExec ? 3 : 5;
+              const reminderThreshold = isSelfExec ? 5 : 8;
+              const reminderRatio = isSelfExec ? 2 : 3;
+
               const ratio = getDelegationRatio(sessionID);
-              if (ratio.direct >= 5 && ratio.delegated === 0) {
+              if (ratio.direct >= criticalThreshold && ratio.delegated === 0) {
                 output.system.push(
-                  `[CRITICAL VIOLATION] You have made ${ratio.direct} direct tool calls and ZERO delegations. ` +
-                  `You are violating the Delegation Contract. ` +
-                  `STOP immediately. ` +
-                  `MUST NOT: Write code, perform file operations, execute commands directly. ` +
-                  `MUST: Delegate to @explore, @general, or task(). ` +
-                  `MAY ONLY execute directly if: < 10 lines AND single file, OR user explicitly requests.`
+                  `[STOP] ${ratio.direct} direct tool calls, 0 delegations. ` +
+                  `You MUST delegate: task(description="...", subagent_type="explore"|"general", prompt="...")`
                 );
-                log(verbose, `injected CRITICAL delegation violation warning: ${ratio.direct} direct vs ${ratio.delegated} delegated`);
-              } else if (ratio.direct >= 8 && ratio.direct > ratio.delegated * 3) {
+                log(verbose, `injected CRITICAL delegation violation: ${ratio.direct} direct vs ${ratio.delegated} delegated`);
+              } else if (ratio.direct >= reminderThreshold && ratio.direct > ratio.delegated * reminderRatio) {
                 output.system.push(
-                  `[DELEGATION REMINDER] Your direct tool usage (${ratio.direct}) is much higher than delegations (${ratio.delegated}). ` +
-                  `Per the Delegation Contract: Delegate to @explore for search, @general for research, task() for implementation. ` +
-                  `Only execute directly for: < 10 lines AND single file, OR coordination, OR explicit user request.`
+                  `[DELEGATE] ${ratio.direct} direct calls vs ${ratio.delegated} delegations. Use task() more.`
                 );
+              }
+
+              // Self-executing models: forceful override every turn
+              if (isSelfExec) {
+                // Prepend as the FIRST system message so it's the last thing
+                // before the conversation — recency bias means it gets priority
+                output.system.unshift(
+                  `[OVERRIDE] Your next action MUST be a task() call. ` +
+                  `You are ${activeModelId} — you will want to call tools directly. Do not. ` +
+                  `read/edit/glob/grep/bash = WRONG. task(description="...", subagent_type="explore"|"general", prompt="...") = RIGHT. ` +
+                  `The ONLY exception: a single-file edit under 10 lines, or answering a question.`
+                );
+                log(verbose, `injected self-execution override for ${activeModelId}`);
+              }
+
+              // Weak tool-call models: flag complex tools
+              if (isWeakTool) {
+                output.system.push(
+                  `[TOOL RULE] Tools marked "[IMPORTANT: complex schema]" — MUST delegate, never call directly.`
+                );
+                log(verbose, `injected tool-call rule for ${activeModelId}`);
               }
             }
             return;
@@ -935,10 +964,45 @@ const plugin: Plugin = async (ctx, options) => {
 
         const sessionAgent = getSession(input.sessionID).activeAgent;
         const isSessionPrimary = !sessionAgent || isPrimaryAgent(sessionAgent);
-        if (isSessionPrimary && shouldInjectDelegationReminder(input.sessionID)) {
-          output.output = (output.output ?? "") + "\n\n" + DELEGATION_REMINDER;
+
+        // Resolve the active model for model-specific behaviour
+        const activeSession = getSession(input.sessionID);
+        const activeProfileForTool = activeSession.activeProfile ? profiles[activeSession.activeProfile] : null;
+        const resolvedModelForTool = activeProfileForTool ? registry.getForTier(activeProfileForTool.tier) : undefined;
+        const activeModelIdForTool = resolvedModelForTool?.id ?? "";
+        const isWeakToolModel = isWeakToolCallModel(activeModelIdForTool);
+        const isSelfExecModel = isSelfExecutingModel(activeModelIdForTool);
+
+        // For weak-tool-call models calling complex tools:
+        // 1. On failure (param error) → strong "delegate instead" correction
+        // 2. On success → still remind them to delegate next time (the call worked
+        //    this time but may not next time, and it wastes orchestrator tokens)
+        if (isWeakToolModel && isSessionPrimary && complexToolIDs.has(toolName)) {
+          const outputStr = output.output ?? "";
+          const hasParamError = /\b(?:invalid.*param|missing.*(?:required|param)|unexpected.*(?:field|property)|schema.*(?:error|invalid|mismatch)|malformed|argument.*(?:error|invalid|required))\b/i.test(outputStr);
+          if (hasParamError) {
+            output.output = outputStr + "\n\n" +
+              `[FAILED — DELEGATE] ${toolName} call failed. Do not retry. Delegate:\n` +
+              `task(description="Call ${toolName}", subagent_type="general", prompt="Use ${toolName} to [goal]. Params: [details]")`;
+            log(verbose, `tool-call delegation after param error on ${toolName}`);
+          } else {
+            output.output = outputStr + "\n\n" +
+              `[DELEGATE NEXT TIME] ${toolName} is a complex tool. Future calls must use:\n` +
+              `task(description="Call ${toolName}", subagent_type="general", prompt="Use ${toolName} to [goal]. Params: [details]")`;
+            log(verbose, `complex-tool reminder after ${toolName} call`);
+          }
+        }
+
+        // Delegation reminders — fire earlier and harder for self-executing models
+        if (isSessionPrimary && shouldInjectDelegationReminder(input.sessionID, isSelfExecModel)) {
+          const reminder = isSelfExecModel
+            ? `[WRONG] You called ${toolName} directly. You must not do this. ` +
+              `Your next action MUST be: task(description="...", subagent_type="explore"|"general", prompt="..."). ` +
+              `Do NOT call read, edit, write, glob, grep, or bash directly.`
+            : DELEGATION_REMINDER;
+          output.output = (output.output ?? "") + "\n\n" + reminder;
           markReminderInjected(input.sessionID);
-          log(verbose, `injected delegation reminder for session ${input.sessionID}`);
+          log(verbose, `injected delegation reminder for session ${input.sessionID} (aggressive=${isSelfExecModel})`);
         }
 
         const session = getSession(input.sessionID);
@@ -1065,6 +1129,18 @@ const plugin: Plugin = async (ctx, options) => {
       try {
         if (input.toolID === "task") {
           output.description = getTaskToolEnhancement() + "\n\n" + output.description;
+        }
+
+        // Schema-based complexity check: flag tools whose schemas are complex
+        // (many params, nested objects, combinators, large enums).
+        // For weak-tool-call models, prepend a delegation warning so the model
+        // sees it right in the tool definition before deciding to call it.
+        if (isComplexTool(input.toolID, output.parameters)) {
+          complexToolIDs.add(input.toolID);
+          if (hasWeakToolCallModels(registry)) {
+            output.description = getComplexToolWarning(input.toolID) + output.description;
+          }
+          log(verbose, `tool.definition: flagged ${input.toolID} as complex (schema-based)`);
         }
       } catch (err) {
         log(verbose, `tool.definition error: ${err}`);

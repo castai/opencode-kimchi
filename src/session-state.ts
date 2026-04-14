@@ -200,12 +200,14 @@ export function trackDelegationToolCall(sessionID: string): void {
   state.activity.reminderInjected = false;
 }
 
-export function shouldInjectDelegationReminder(sessionID: string): boolean {
+export function shouldInjectDelegationReminder(sessionID: string, aggressive = false): boolean {
   const state = sessions.get(sessionID);
   if (!state) return false;
   if (state.activity.reminderInjected) return false;
   if (state.activity.delegationToolCalls > 0) return false;
-  return state.activity.directToolCalls >= 3;
+  // Self-executing models get reminders after just 2 direct calls (vs 3 normally)
+  const threshold = aggressive ? 2 : 3;
+  return state.activity.directToolCalls >= threshold;
 }
 
 export function getDelegationRatio(sessionID: string): { direct: number; delegated: number } {
