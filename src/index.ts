@@ -253,10 +253,13 @@ const plugin: Plugin = async (ctx, options) => {
 
   let profiles = resolveProfiles(registry);
 
-  const llmBaseUrl = (options?.llmBaseUrl as string) ?? CASTAI_LLM_BASE;
-  const llmClassifierEnabled = (options?.llmClassifier as boolean) ?? true;
-  const llmClassifierThreshold = (options?.llmClassifierThreshold as number) ?? 0.5;
-  let apiKey = (options?.apiKey as string) ?? process.env.CASTAI_API_KEY;
+   let llmBaseUrl = (options?.llmBaseUrl as string) ?? CASTAI_LLM_BASE;
+   const llmClassifierEnabled = (options?.llmClassifier as boolean) ?? true;
+   const llmClassifierThreshold = (options?.llmClassifierThreshold as number) ?? 0.5;
+   let apiKey = (options?.apiKey as string) ?? process.env.CASTAI_API_KEY;
+   
+   // Track the effective baseUrl that may be overridden by provider config
+   let effectiveBaseUrl = llmBaseUrl;
 
   const telemetryConfig = buildTelemetryConfig({ ...(options as TelemetryPluginOption | undefined), apiKey }, verbose);
   const telemetry = createTelemetry(telemetryConfig, ctx.client as any);
@@ -264,28 +267,53 @@ const plugin: Plugin = async (ctx, options) => {
   return {
     tool: routingTools,
 
-    provider: {
-      id: providerID,
-      models: async (provider) => {
-        const result: Record<string, any> = {};
+       provider: {
+         id: providerID,
+         npm: "@ai-sdk/openai-compatible",
+         models: async (provider) => {
+          const result: Record<string, any> = {};
 
-        const existingModels = provider?.models ?? {};
-        const firstExisting = Object.values(existingModels)[0] as any;
-        const baseApi = firstExisting?.api;
+          const existingModels = provider?.models ?? {};
+          const firstExisting = Object.values(existingModels)[0] as any;
+          const baseApi = firstExisting?.api;
 
-        // Each model needs its own api object with the correct api.id,
-        // because OpenCode uses api.id as the model parameter sent to the
-        // AI SDK (sdk.chatModel(model.api.id)). If all models share the
-        // same api.id, every model resolves to the same underlying LLM.
-        function apiFor(modelId: string) {
-          return baseApi ? { ...baseApi, id: modelId } : undefined;
-        }
+          // The apiKey and baseURL come from the provider config, available via baseApi
+          // This is because the provider config is loaded before the models hook runs
+          const providerApiKey = baseApi?.apiKey || apiKey || "";
+          const providerBaseUrl = baseApi?.url || baseApi?.baseURL || effectiveBaseUrl || llmBaseUrl;
 
-        const defaultModel = registry.getForTier("coding");
-        if (defaultModel && baseApi) {
-          result["auto"] = {
-            api: apiFor("auto"),
-            name: "Kimchi Auto (routed)",
+          if (verbose) {
+            console.log("[kimchi] models hook - baseApi?.apiKey:", baseApi?.apiKey ? "set" : "not set");
+            console.log("[kimchi] models hook - providerApiKey:", providerApiKey ? "set" : "NOT SET");
+            console.log("[kimchi] models hook - providerBaseUrl:", providerBaseUrl);
+          }
+
+          // Each model needs its own api object with the correct api.id,
+          // because OpenCode uses api.id as the model parameter sent to the
+          // AI SDK (sdk.chatModel(model.api.id)). If all models share the
+          // same api.id, every model resolves to the same underlying LLM.
+          function apiFor(modelId: string) {
+            // Start with base API template if available, or create minimal one
+            const base = baseApi ?? {
+              id: modelId,
+              url: providerBaseUrl,
+              npm: "@ai-sdk/openai-compatible",
+            };
+            
+            // Always include apiKey and url explicitly - use values from provider config
+            return { 
+              ...base, 
+              id: modelId,
+              apiKey: providerApiKey,
+              url: providerBaseUrl,
+            };
+          }
+
+         const defaultModel = registry.getForTier("coding");
+         if (defaultModel) {
+           result["auto"] = {
+             api: apiFor("auto"),
+             name: "Kimchi Auto (routed)",
             capabilities: {
               temperature: true,
               reasoning: false,
@@ -379,19 +407,66 @@ const plugin: Plugin = async (ctx, options) => {
       },
     },
 
-    config: async (config: any) => {
-      const providerConfig = config?.provider?.[providerID];
-      if (providerConfig?.models && typeof providerConfig.models === "object") {
-        registry.loadFromConfig(providerID, providerConfig.models);
-        profiles = resolveProfiles(registry);
-        log(verbose, `loaded ${registry.all().length} models from config`);
-      }
+     config: async (config: any) => {
+       const providerConfig = config?.provider?.[providerID];
+       let modelsLoaded = false;
+       
+        // Try to load models from Kimchi API first if we have an API key
+        // Priority: 1) Plugin options, 2) OpenCode provider config, 3) Already set from env/defaults
+        const apiKeyForModels = (options?.apiKey as string) 
+          ?? providerConfig?.options?.apiKey 
+          ?? apiKey;
+        
+         // Determine baseURL priority: 1) Plugin options, 2) Provider config, 3) Default
+         // Update the outer effectiveBaseUrl so provider.models can use it
+         effectiveBaseUrl = (options?.llmBaseUrl as string)
+           ?? providerConfig?.options?.baseURL
+           ?? effectiveBaseUrl;
+        
+        if (apiKeyForModels) {
+          try {
+            // The baseURL points to the OpenAI-compatible endpoint (e.g., /openai/v1)
+            // but the models metadata API is at the root, so we strip the path suffix
+            let modelsApiUrl = effectiveBaseUrl;
+            if (modelsApiUrl?.includes("/openai/v1")) {
+              modelsApiUrl = modelsApiUrl.replace("/openai/v1", "");
+            }
+            
+            const result = await registry.loadFromApi({
+              baseUrl: modelsApiUrl,
+              apiKey: apiKeyForModels,
+              timeoutMs: 10000
+            });
+           
+           if (result.success) {
+             profiles = resolveProfiles(registry);
+             log(verbose, `loaded ${result.loaded} models from Kimchi API`);
+             modelsLoaded = true;
+           } else {
+             log(verbose, `failed to load models from Kimchi API: ${result.warnings.join(", ")}`);
+           }
+         } catch (error) {
+           log(verbose, `error loading models from Kimchi API: ${error}`);
+         }
+       }
+       
+       // Fall back to loading from config if API loading failed or no API key
+       if (!modelsLoaded && providerConfig?.models && typeof providerConfig.models === "object") {
+         registry.loadFromConfig(providerID, providerConfig.models);
+         profiles = resolveProfiles(registry);
+         log(verbose, `loaded ${registry.all().length} models from config`);
+       }
 
-      if (providerConfig?.options?.apiKey) {
-        apiKey = providerConfig.options.apiKey;
-        // Update telemetry config with the new API key
-        telemetryConfig.headers["Authorization"] = `Bearer ${apiKey}`;
-      }
+       // Update apiKey from provider config if different (takes precedence over plugin options/env)
+       // effectiveBaseUrl was already updated above to include provider config
+       const providerApiKey = providerConfig?.options?.apiKey;
+       if (providerApiKey && providerApiKey !== apiKey) {
+         apiKey = providerApiKey;
+         telemetryConfig.headers["Authorization"] = `Bearer ${apiKey}`;
+       }
+       
+       // Also update llmBaseUrl for LLM classifier to use the same effectiveBaseUrl
+       llmBaseUrl = effectiveBaseUrl;
 
       const autoModel = `${providerID}/auto`;
 

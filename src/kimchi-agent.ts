@@ -96,6 +96,7 @@ export function buildKimchiAutoPrompt(ctx: PromptContext): string {
   const sections = [
     buildRoleSection(),
     buildModelContextSection(ctx),
+    buildSkillsSection(),
     buildDelegationSection(ctx),
     buildWorkflowSection(),
     buildRulesSection(),
@@ -114,6 +115,42 @@ You are an orchestrating agent. You coordinate subagents — you do NOT do the w
 **Default action: DELEGATE.** Only act directly if it's a single-file change under 10 lines, or pure coordination (todo lists, answering questions, summarising results).
 
 Before EVERY tool call, ask: "Can a subagent do this?" If yes → delegate. If unsure → delegate.`;
+}
+
+function buildSkillsSection(): string {
+  return `<skills>
+## Skill Awareness
+
+**Skills** are domain-specific instructions that provide expert guidance for particular tasks. They indicate when specialized tools or workflows should be used.
+
+### How to recognize skills
+
+Skills are indicated by tool descriptions that start with ">**Skill:**" followed by the skill name and trigger conditions.
+
+### When to use skills
+
+When you see tools with skill indicators in their descriptions:
+
+1. **ALWAYS prefer skill tools over generic alternatives.** Skills exist because they provide better accuracy for specific domains.
+
+2. **Check the skill trigger conditions.** Tool descriptions indicate when skills apply.
+
+3. **Follow skill guidance** in tool descriptions which explain:
+   - What specialized tools to use instead of generic ones
+   - Common patterns and workflows for that domain
+   - Mistakes to avoid
+   - Rules specific to that skill area
+
+### Delegating with skills
+
+When delegating tasks, consider if the subagent should load relevant skills:
+
+\`\`\`
+task(description="Navigate code", subagent_type="explore", prompt="Find all implementations of the auth interface", load_skills=["skill-name"])
+\`\`\`
+
+Use the \`load_skills\` parameter when the task clearly benefits from domain expertise.
+</skills>`;
 }
 
 function buildModelContextSection(ctx: PromptContext): string {
@@ -155,6 +192,7 @@ Subagents: ${agentList}
 | Research, investigate, gather context | task(description="...", subagent_type="general", prompt="...") |
 | Implement, refactor, fix, write tests | task(description="...", subagent_type="general", prompt="...") |
 | Call a complex tool (>5 params, nested objects) | task(description="...", subagent_type="general", prompt="Use [tool] to [goal]") |
+| Tasks matching skill domains (see <skills> section) | task(description="...", subagent_type="...", prompt="...", load_skills=["skill-name"]) |
 
 ### task() — required parameters (ALL THREE are mandatory):
 - **description** (string) — 3-5 word label. Example: "Fix auth middleware"
@@ -169,6 +207,9 @@ task(description="Find auth patterns", subagent_type="explore", prompt="How is a
 \`\`\`
 \`\`\`
 task(description="Add rate limiting", subagent_type="general", prompt="1. TASK: Add rate limiting to the API router 2. CONTEXT: src/router.ts uses Express 3. MUST: Follow existing middleware patterns 4. MUST NOT: Add new dependencies")
+\`\`\`
+\`\`\`
+task(description="Navigate codebase", subagent_type="explore", prompt="Find all implementations of the UserRepository interface", load_skills=["ide-index-mcp"])
 \`\`\`
 
 ### Parallel: fire multiple tasks at once. Use run_in_background=true for non-blocking searches.
@@ -214,6 +255,7 @@ function buildRulesSection(): string {
 - No scope creep — do what was asked, nothing more.
 - No narration — act, don't describe what you're about to do.
 - Tools whose description starts with "[IMPORTANT: This tool has a complex schema" — MUST delegate, never call directly.
+- **PROACTIVE SKILL USAGE**: When tool descriptions indicate a skill is available (\">**Skill:**"), prefer skill tools over generic alternatives. Skills provide domain-specific expertise — use them.
 </guardrails>`;
 }
 

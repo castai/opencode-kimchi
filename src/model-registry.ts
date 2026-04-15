@@ -1,3 +1,5 @@
+import { fetchModelsFromApi } from "./model-api-client.js";
+
 export type ModelTier = "reasoning" | "coding" | "quick";
 
 export interface KimchiModel {
@@ -325,18 +327,52 @@ export class ModelRegistry {
     return undefined;
   }
 
-  getMostExpensiveModel(): KimchiModel | undefined {
-    let most: KimchiModel | undefined;
-    let highestCost = 0;
-    for (const model of this.available.values()) {
-      const blended = model.cost.input + model.cost.output;
-      if (blended > highestCost) {
-        highestCost = blended;
-        most = model;
-      }
-    }
-    return most;
-  }
-}
+   getMostExpensiveModel(): KimchiModel | undefined {
+     let most: KimchiModel | undefined;
+     let highestCost = 0;
+     for (const model of this.available.values()) {
+       const blended = model.cost.input + model.cost.output;
+       if (blended > highestCost) {
+         highestCost = blended;
+         most = model;
+       }
+     }
+     return most;
+   }
 
-export { MODEL_PLACEMENTS };
+   /**
+    * Load models from the Kimchi API endpoint
+    * @param options API connection options
+    * @returns Object with success status, number of models loaded, and any warnings
+    */
+   async loadFromApi(
+     options: { baseUrl?: string; apiKey: string; timeoutMs?: number }
+   ): Promise<{ success: boolean; loaded: number; warnings: string[] }> {
+     const { models, errors } = await fetchModelsFromApi(options);
+     
+     if (errors.length > 0) {
+       // Log warnings but don't fail completely - we might still have some models
+       console.warn("Warnings loading models from API:", errors);
+     }
+     
+     if (models.length === 0) {
+       return { success: false, loaded: 0, warnings: errors };
+     }
+     
+     // Clear existing models and load from API
+     this.available.clear();
+     
+     for (const model of models) {
+       this.available.set(model.id, model);
+     }
+     
+     this.rebuildTierPriority();
+     
+     return { 
+       success: true, 
+       loaded: models.length, 
+       warnings: errors 
+     };
+   }
+ }
+ export { MODEL_PLACEMENTS };
