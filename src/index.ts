@@ -1,7 +1,7 @@
 import type { Plugin, PluginModule } from "@opencode-ai/plugin";
 import type { ProfileID } from "./profiles.js";
 import type { ModelTier, KimchiModel } from "./model-registry.js";
-import { ModelRegistry } from "./model-registry.js";
+import { ModelRegistry, isSunset, isDeprecated } from "./model-registry.js";
 import { resolveProfiles, type AgentProfile } from "./profiles.js";
 import { classifyWithHeuristics } from "./heuristic-classifier.js";
 import { extractSignals, detectPhase } from "./phase-detector.js";
@@ -29,6 +29,8 @@ import {
   shouldInjectDelegationReminder,
   markReminderInjected,
   getDelegationRatio,
+  hasShownDeprecationWarning,
+  markDeprecationWarningShown,
 } from "./session-state.js";
 import {
   getAgentRouting,
@@ -236,6 +238,49 @@ function showRouting(client: any, profile: string, model: string, tier: string, 
   }).catch(() => {});
 }
 
+function warnIfDeprecated(
+  sessionID: string,
+  model: KimchiModel | undefined,
+  now: Date,
+  client: any,
+): void {
+  if (!model) return;
+  if (!model.deprecatedAt && !model.sunsetAt) return;
+  if (hasShownDeprecationWarning(sessionID, model.id)) return;
+
+  const sunset = isSunset(model, now);
+  const deprecated = isDeprecated(model, now);
+  if (!sunset && !deprecated) return;
+
+  const title = sunset ? "Kimchi: Model sunset" : "Kimchi: Model deprecated";
+  const parts: string[] = [];
+
+  if (model.replacementModel) {
+    parts.push(`Replacement: ${model.replacementModel}`);
+  }
+  if (model.deprecationNote) {
+    parts.push(model.deprecationNote);
+  }
+  if (parts.length === 0) {
+    parts.push(
+      sunset
+        ? "This model is no longer available for auto-routing."
+        : "This model is scheduled for removal."
+    );
+  }
+
+  client?.tui?.showToast({
+    body: {
+      title,
+      message: parts.join(" · "),
+      variant: "warning" as const,
+      duration: 7000,
+    },
+  }).catch(() => {});
+
+  markDeprecationWarningShown(sessionID, model.id);
+}
+
 const plugin: Plugin = async (ctx, options) => {
   const providerID = (options?.provider as string) ?? KIMCHI_PROVIDER;
   const verbose = (options?.verbose as boolean) ?? false;
@@ -272,6 +317,7 @@ const plugin: Plugin = async (ctx, options) => {
          npm: "@ai-sdk/openai-compatible",
          models: async (provider) => {
           const result: Record<string, any> = {};
+          const now = new Date();
 
           const existingModels = provider?.models ?? {};
           const firstExisting = Object.values(existingModels)[0] as any;
@@ -395,7 +441,7 @@ const plugin: Plugin = async (ctx, options) => {
                 context: model.contextWindow,
                 output: model.maxOutput,
               },
-              status: "active" as const,
+              status: registry.getDeprecationStatus(model.id, now) === "active" ? "active" : "deprecated",
               options: {},
               headers: {},
               release_date: "2025-01-01",
@@ -570,6 +616,8 @@ const plugin: Plugin = async (ctx, options) => {
         log(verbose, `chat.message: sessionID=${sessionID}`);
         if (!sessionID) return;
 
+        const now = new Date();
+
         if (hasPendingFallback(sessionID)) {
           const fallbackModel = getNextFallbackModel(sessionID, registry);
           const fallbackState = consumePendingFallback(sessionID);
@@ -580,6 +628,7 @@ const plugin: Plugin = async (ctx, options) => {
             output.message.model = { providerID, modelID: fallbackModel.id };
             log(verbose, `fallback: ${fallbackState.failedModelID} failed, switching to ${fallbackModel.id}`);
             showRouting(client, profileId, fallbackModel.id, fallbackModel.tier, `fallback: ${fallbackState.failedModelID} failed`, sessionID);
+            warnIfDeprecated(sessionID, fallbackModel, now, client);
             return;
           }
           log(verbose, `fallback chain exhausted for session ${sessionID}, no more models to try`);
@@ -633,6 +682,7 @@ const plugin: Plugin = async (ctx, options) => {
           recordDecision(sessionID, { profile: profileId, source: `direct: ${tier}` });
           log(verbose, `-> ${profileId} (direct ${tier} selection)`);
           showRouting(client, profileId, model?.id ?? tier, tier, `direct: ${tier}`, sessionID);
+          warnIfDeprecated(sessionID, model, now, client);
           return;
         }
 
@@ -692,6 +742,7 @@ const plugin: Plugin = async (ctx, options) => {
             log(verbose, `-> direct model: ${knownModel.id} (bypassing auto-routing)`);
             recordDecision(sessionID, { profile: profileId, source: `direct: ${knownModel.id}` });
             showRouting(client, profileId, knownModel.id, knownModel.tier, `direct: ${knownModel.id}`, sessionID);
+            warnIfDeprecated(sessionID, knownModel, now, client);
           } else {
             log(verbose, `model not found in registry: ${modelIdWithoutPrefix}`);
           }
@@ -716,6 +767,7 @@ const plugin: Plugin = async (ctx, options) => {
           recordDecision(sessionID, { profile: profileId, source: `agent: ${agentName} → ${tier}` });
           log(verbose, `-> ${profileId} (agent: ${agentName})`);
           showRouting(client, profileId, model?.id ?? tier, tier, `agent: ${agentName}`, sessionID);
+          warnIfDeprecated(sessionID, model, now, client);
           return;
         }
 
@@ -829,7 +881,7 @@ const plugin: Plugin = async (ctx, options) => {
 
         log(verbose, `auto-routing resolved: ${resolvedModel?.id ?? "none"} (not setting output.message.model)`);
         showRouting(client, profile.id, resolvedModel?.id ?? profile.model, profile.tier, source, sessionID);
-
+        warnIfDeprecated(sessionID, resolvedModel, now, client);
 
       } catch (err) {
         log(verbose, `chat.message error: ${err}`);
@@ -946,6 +998,8 @@ const plugin: Plugin = async (ctx, options) => {
           return;
         }
 
+        const now = new Date();
+
         const sessionID = getSessionID(input as any);
         if (!sessionID) return;
 
@@ -960,6 +1014,7 @@ const plugin: Plugin = async (ctx, options) => {
           const temp = profileId ? profiles[profileId].temperature : 0.6;
           output.temperature = safeTemperature(temp, modelEntry);
           log(verbose, `chat.params: explicit model=${selectedModel}, temp=${output.temperature}`);
+          warnIfDeprecated(sessionID, modelEntry, now, client);
           return;
         }
 
@@ -986,6 +1041,7 @@ const plugin: Plugin = async (ctx, options) => {
             output.options = { ...output.options, model: resolvedModel.id };
             output.temperature = safeTemperature(activeProfile.temperature, resolvedModel);
             log(verbose, `chat.params: auto-routed model=${resolvedModel.id}, temp=${output.temperature}`);
+            warnIfDeprecated(sessionID, resolvedModel, now, client);
           }
           return;
         }
