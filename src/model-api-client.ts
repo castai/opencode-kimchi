@@ -1,5 +1,10 @@
 import { KimchiModel, ModelTier } from "./model-registry.js";
 
+interface ApiAlternative {
+  slug: string;
+  display_name: string;
+}
+
 interface ApiModelEntry {
   slug: string;
   display_name: string;
@@ -20,6 +25,11 @@ interface ApiModelEntry {
     input_per_1m: number;
     output_per_1m: number;
   };
+  deprecated_at?: string;
+  sunset_at?: string;
+  replacement_model?: string;
+  alternatives?: ApiAlternative[];
+  deprecation_note?: string;
 }
 
 interface ApiResponse {
@@ -67,6 +77,10 @@ export async function fetchModelsFromApi(
       // Determine tier based on capabilities (will be refined by MODEL_PLACEMENTS)
       const inferredTier = inferTierFromCapabilities(apiModel);
       
+      // API returns ISO 8601 UTC strings (e.g. "2025-06-01T00:00:00Z"); new Date() handles them correctly.
+      const deprecatedAt = apiModel.deprecated_at ? new Date(apiModel.deprecated_at) : undefined;
+      const sunsetAt = apiModel.sunset_at ? new Date(apiModel.sunset_at) : undefined;
+
       return {
         id: apiModel.slug,
         name: apiModel.display_name || apiModel.slug,
@@ -82,6 +96,11 @@ export async function fetchModelsFromApi(
           input: apiModel.pricing?.input_per_1m ?? 1.0,
           output: apiModel.pricing?.output_per_1m ?? 3.0,
         },
+        deprecatedAt: deprecatedAt && !isNaN(deprecatedAt.getTime()) ? deprecatedAt : undefined,
+        sunsetAt: sunsetAt && !isNaN(sunsetAt.getTime()) ? sunsetAt : undefined,
+        replacementModel: apiModel.replacement_model,
+        alternatives: apiModel.alternatives?.map((a) => ({ id: a.slug, name: a.display_name })),
+        deprecationNote: apiModel.deprecation_note,
       };
     });
 

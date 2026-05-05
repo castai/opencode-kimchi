@@ -49,6 +49,7 @@ export interface SessionState {
   activity: SessionActivity;
   history: RoutingDecision[];
   estimatedContextTokens: number;
+  deprecationWarningsShown: Set<string>;
 }
 
 const sessions = new Map<string, SessionState>();
@@ -79,6 +80,7 @@ function defaultState(): SessionState {
     activity: defaultActivity(),
     history: [],
     estimatedContextTokens: 0,
+    deprecationWarningsShown: new Set(),
   };
 }
 
@@ -244,6 +246,14 @@ export function recordDecision(sessionID: string, decision: Omit<RoutingDecision
   if (state.history.length > MAX_HISTORY) {
     state.history.shift();
   }
+}
+
+export function hasShownDeprecationWarning(sessionID: string, modelID: string): boolean {
+  return getSession(sessionID).deprecationWarningsShown.has(modelID);
+}
+
+export function markDeprecationWarningShown(sessionID: string, modelID: string): void {
+  getSession(sessionID).deprecationWarningsShown.add(modelID);
 }
 
 export function clearSession(sessionID: string): void {
