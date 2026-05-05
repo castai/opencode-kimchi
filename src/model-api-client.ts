@@ -77,6 +77,7 @@ export async function fetchModelsFromApi(
       // Determine tier based on capabilities (will be refined by MODEL_PLACEMENTS)
       const inferredTier = inferTierFromCapabilities(apiModel);
       
+      // API returns ISO 8601 UTC strings (e.g. "2025-06-01T00:00:00Z"); new Date() handles them correctly.
       const deprecatedAt = apiModel.deprecated_at ? new Date(apiModel.deprecated_at) : undefined;
       const sunsetAt = apiModel.sunset_at ? new Date(apiModel.sunset_at) : undefined;
 

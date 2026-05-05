@@ -224,21 +224,16 @@ export class ModelRegistry {
     }
 
     for (const [tier, entries] of grouped) {
-      // 1. Sort by priority/cost (existing behaviour)
-      entries.sort((a, b) => {
-        if (a.priority !== b.priority) return a.priority - b.priority;
-        return (a.model.cost.input + a.model.cost.output) - (b.model.cost.input + b.model.cost.output);
-      });
-
-      // 2. Deprecation penalty: non-deprecated models first, preserving priority order
+      // Single sort: deprecation penalty first, then priority, then cost
       entries.sort((a, b) => {
         const aDep = isDeprecated(a.model, now);
         const bDep = isDeprecated(b.model, now);
         if (aDep !== bDep) return aDep ? 1 : -1;
-        return 0;
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        return (a.model.cost.input + a.model.cost.output) - (b.model.cost.input + b.model.cost.output);
       });
 
-      // 3. Sunset exclusion: remove models past their sunset date from auto-routing
+      // Sunset exclusion: remove models past their sunset date from auto-routing
       const filtered = entries.filter((e) => !isSunset(e.model, now));
 
       this.tierPriority.set(tier, filtered.map((e) => e.model));
