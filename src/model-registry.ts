@@ -2,6 +2,16 @@ import { fetchModelsFromApi } from "./model-api-client.js";
 
 export type ModelTier = "reasoning" | "coding" | "quick";
 
+export function isDeprecated(model: KimchiModel, now: Date): boolean {
+  if (!model.deprecatedAt) return false;
+  return now >= model.deprecatedAt;
+}
+
+export function isSunset(model: KimchiModel, now: Date): boolean {
+  if (!model.sunsetAt) return false;
+  return now >= model.sunsetAt;
+}
+
 export interface KimchiModel {
   id: string;
   name: string;
@@ -15,6 +25,11 @@ export interface KimchiModel {
   supportsImages: boolean;
   /** USD per 1M tokens */
   cost: { input: number; output: number };
+  deprecatedAt?: Date;
+  sunsetAt?: Date;
+  replacementModel?: string;
+  alternatives?: { id: string; name: string }[];
+  deprecationNote?: string;
 }
 
 export interface ConfigModelEntry {
@@ -36,6 +51,11 @@ export interface ConfigModelEntry {
     input: Array<string>;
     output: Array<string>;
   };
+  deprecated_at?: string;
+  sunset_at?: string;
+  replacement_model?: string;
+  alternatives?: Array<{ slug?: string; id?: string; display_name?: string }>;
+  deprecation_note?: string;
   [key: string]: unknown;
 }
 
@@ -154,7 +174,7 @@ export class ModelRegistry {
    * Rebuilds tier lists. Models appear in every tier they have a placement for,
    * sorted by priority (lowest first), then cost as tiebreaker.
    */
-  private rebuildTierPriority(): void {
+  private rebuildTierPriority(now = new Date()): void {
     this.tierPriority.clear();
     const grouped = new Map<ModelTier, { model: KimchiModel; priority: number }[]>();
 
@@ -204,11 +224,19 @@ export class ModelRegistry {
     }
 
     for (const [tier, entries] of grouped) {
+      // Single sort: deprecation penalty first, then priority, then cost
       entries.sort((a, b) => {
+        const aDep = isDeprecated(a.model, now);
+        const bDep = isDeprecated(b.model, now);
+        if (aDep !== bDep) return aDep ? 1 : -1;
         if (a.priority !== b.priority) return a.priority - b.priority;
         return (a.model.cost.input + a.model.cost.output) - (b.model.cost.input + b.model.cost.output);
       });
-      this.tierPriority.set(tier, entries.map((e) => e.model));
+
+      // Sunset exclusion: remove models past their sunset date from auto-routing
+      const filtered = entries.filter((e) => !isSunset(e.model, now));
+
+      this.tierPriority.set(tier, filtered.map((e) => e.model));
     }
   }
 
@@ -228,6 +256,14 @@ export class ModelRegistry {
     return Array.from(this.available.values());
   }
 
+  getDeprecationStatus(modelId: string, now = new Date()): "active" | "deprecated" | "sunset" | undefined {
+    const model = this.available.get(modelId);
+    if (!model) return undefined;
+    if (isSunset(model, now)) return "sunset";
+    if (isDeprecated(model, now)) return "deprecated";
+    return "active";
+  }
+
   /**
    * Load models from the user's opencode config provider section.
    * Config provides all model metadata; we only add tier + priority from MODEL_PLACEMENTS.
@@ -237,6 +273,9 @@ export class ModelRegistry {
     for (const [modelId, entry] of Object.entries(models)) {
       const placements = MODEL_PLACEMENTS[modelId];
       const primaryTier = placements?.[0]?.tier ?? this.inferTier(entry);
+
+      const deprecatedAt = entry.deprecated_at ? new Date(entry.deprecated_at) : undefined;
+      const sunsetAt = entry.sunset_at ? new Date(entry.sunset_at) : undefined;
 
       this.available.set(modelId, {
         id: modelId,
@@ -251,6 +290,14 @@ export class ModelRegistry {
           input: entry.cost?.input ?? 1.0,
           output: entry.cost?.output ?? 3.0,
         },
+        deprecatedAt: deprecatedAt && !isNaN(deprecatedAt.getTime()) ? deprecatedAt : undefined,
+        sunsetAt: sunsetAt && !isNaN(sunsetAt.getTime()) ? sunsetAt : undefined,
+        replacementModel: entry.replacement_model,
+        alternatives: entry.alternatives?.map((a) => ({
+          id: a.slug ?? a.id ?? "",
+          name: a.display_name ?? a.slug ?? a.id ?? "",
+        })),
+        deprecationNote: entry.deprecation_note,
       });
     }
 
