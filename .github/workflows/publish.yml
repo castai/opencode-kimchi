@@ -19,6 +19,7 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
           scope: '@kimchi-dev'
+          provenance: true
 
       - run: npm ci
 
