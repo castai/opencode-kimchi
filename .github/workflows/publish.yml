@@ -20,8 +20,6 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@kimchi-dev'
 
-      - run: npm install -g npm@11.14.1
-
       - run: npm ci
 
       - run: npm test
