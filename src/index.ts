@@ -561,8 +561,8 @@ const plugin: Plugin = async (ctx, options) => {
       }
 
       const subagentDefaults: Record<string, { model: string; mode?: string }> = {
-        explore:     { model: autoModel, mode: "subagent" },
-        general:     { model: autoModel, mode: "subagent" },
+        explore:     { model: `${providerID}/quick`, mode: "subagent" },
+        general:     { model: `${providerID}/coding`, mode: "subagent" },
         title:       { model: `${providerID}/quick`, mode: "subagent" },
         summary:     { model: `${providerID}/quick`, mode: "subagent" },
         compaction:  { model: `${providerID}/quick`, mode: "subagent" },
