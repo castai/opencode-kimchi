@@ -1,6 +1,10 @@
 {
   "name": "@kimchi-dev/opencode-kimchi",
   "version": "1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/castai/opencode-kimchi"
+  },
   "description": "Conversation-aware model routing for OpenCode using Cast AI's Kimchi models",
   "type": "module",
   "main": "dist/index.js",
