@@ -20,6 +20,8 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@kimchi-dev'
 
+      - run: npm install -g npm@11.14.1
+
       - run: npm ci
 
       - run: npm test
@@ -28,5 +30,3 @@ jobs:
         run: npm version ${GITHUB_REF_NAME#v} --no-git-tag-version
 
       - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
